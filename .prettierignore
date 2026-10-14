@@ -1,0 +1,9 @@
+.next
+node_modules
+coverage
+out
+build
+src/generated
+prisma/migrations
+package-lock.json
+public/icons

@@ -1,0 +1,377 @@
+// Identity tables (in the shape the Auth.js Prisma adapter expects), chat,
+// files, resume extraction, client templates and formatting jobs. Every
+// product entity is owned by a User via `userId` with `onDelete: Cascade`.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  /// Always stored lower-cased and trimmed (see normalizeEmail), so the
+  /// unique index is effectively case-insensitive.
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  /// Argon2id PHC string for email/password sign-in. Null for accounts that
+  /// only use an OAuth provider. Never select this outside the auth service.
+  passwordHash  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts          Account[]
+  sessions          Session[]
+  conversations     Conversation[]
+  uploadedFiles     UploadedFile[]
+  resumeExtractions ResumeExtraction[]
+  clientTemplates   ClientTemplate[]
+  formattingJobs    FormattingJob[]
+  generatedDocs     GeneratedDocument[]
+
+  @@map("users")
+}
+
+// OAuth / provider accounts linked to a user (Auth.js adapter shape; the
+// snake_case token fields are required by the adapter).
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+// Database sessions (used if Auth.js is configured with the "database" strategy).
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+// Email magic-link / verification tokens.
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Chat
+// ---------------------------------------------------------------------------
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+// A chat thread owned by exactly one user. Every query must filter by
+// `userId` from the session (see src/server/chat/conversation-service.ts).
+model Conversation {
+  id               String    @id @default(cuid())
+  userId           String
+  title            String    @db.VarChar(100)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  /// Sort key for the conversation list; bumped when a message is added
+  /// (renaming does not reorder the list).
+  lastMessageAt    DateTime  @default(now())
+  /// Client template selected for formatting this conversation's resume.
+  clientTemplateId String?
+  /// Set when the user pins the chat (pinned chats are listed first, newest pin first).
+  pinnedAt         DateTime?
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages       Message[]
+  clientTemplate ClientTemplate? @relation(fields: [clientTemplateId], references: [id], onDelete: SetNull)
+  formattingJobs FormattingJob[]
+
+  @@index([userId, lastMessageAt(sort: Desc)])
+  @@map("conversations")
+}
+
+// One turn in a conversation. Provider-agnostic: assistant replies from any AI
+// provider are stored with role ASSISTANT. Files are linked via MessageAttachment.
+model Message {
+  id             String      @id @default(cuid())
+  conversationId String
+  role           MessageRole
+  /// Plain text, rendered as text (never as HTML).
+  content        String
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  conversation Conversation        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  attachments  MessageAttachment[]
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// ---------------------------------------------------------------------------
+// Files (bytes live in private object storage; only metadata is stored here)
+// ---------------------------------------------------------------------------
+
+enum UploadedFileStatus {
+  /// Upload URL issued; the object may or may not exist yet.
+  PENDING_UPLOAD
+  /// Object verified server-side (exists, size, type, signature). Not processed.
+  UPLOADED
+  /// Reserved: a later phase extracts text / inspects the file.
+  PROCESSING
+  /// Reserved: processing finished successfully.
+  READY
+  /// Verification or processing failed; the object has been removed.
+  FAILED
+  /// Discarded by the user or with its conversation; object deletion requested.
+  DELETED
+}
+
+model UploadedFile {
+  /// Server-generated (also part of the storage key).
+  id               String             @id
+  userId           String
+  /// Sanitised display name only — never used to build storage keys or paths.
+  originalFilename String             @db.VarChar(255)
+  /// Server-generated object key: users/{userId}/uploads/{id}.{ext}
+  storageKey       String             @unique
+  mimeType         String
+  /// Declared when the upload is requested; must equal the stored size to confirm.
+  sizeBytes        Int
+  status           UploadedFileStatus @default(PENDING_UPLOAD)
+  /// What the upload is for. Template files are never attached to messages.
+  purpose          FilePurpose        @default(ATTACHMENT)
+  /// Internal reason code for FAILED (never shown verbatim to users).
+  failureReason    String?
+  uploadedAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  attachment     MessageAttachment?
+  extraction     ResumeExtraction?
+  template       ClientTemplate?
+  /// Formatting jobs that used this file as their resume.
+  formattingJobs FormattingJob[]
+
+  @@index([userId, status])
+  /// Used by the stale-upload cleanup job (status + age).
+  @@index([status, createdAt])
+  @@map("uploaded_files")
+}
+
+/// Links a message to a file. A file belongs to at most one message.
+model MessageAttachment {
+  id             String   @id @default(cuid())
+  messageId      String
+  uploadedFileId String   @unique
+  /// Display order within the message.
+  position       Int
+  createdAt      DateTime @default(now())
+
+  message      Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  /// Cascade so deleting a user (which reaches files and attachments by two
+  /// paths) always succeeds. The application never deletes an attached file:
+  /// discard/purge only remove files with no attachment.
+  uploadedFile UploadedFile @relation(fields: [uploadedFileId], references: [id], onDelete: Cascade)
+
+  @@index([messageId, position])
+  @@map("message_attachments")
+}
+
+// ---------------------------------------------------------------------------
+// Resume extraction (deterministic text + section parsing; no AI)
+// ---------------------------------------------------------------------------
+
+enum ExtractionStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+/// Structured resume extracted from one uploaded PDF/DOCX. The source file in
+/// object storage is never modified; re-running extraction overwrites this row.
+model ResumeExtraction {
+  id             String           @id @default(cuid())
+  uploadedFileId String           @unique
+  /// Denormalised owner for direct owner-scoped queries.
+  userId         String
+  status         ExtractionStatus @default(PROCESSING)
+  /// Version of the parsing rules that produced `content` (re-run when it changes).
+  parserVersion  Int
+  /// Plain text pulled from the document (capped), kept for later phases.
+  rawText        String?
+  /// ResumeContent JSON — validated with the Zod schema before it is stored.
+  content        Json?
+  /// User-facing notes such as "Couldn't detect the candidate's name."
+  warnings       Json?
+  /// Internal failure code (e.g. no_text, unreadable); mapped to safe messages.
+  failureCode    String?
+  startedAt      DateTime         @default(now())
+  completedAt    DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  uploadedFile UploadedFile @relation(fields: [uploadedFileId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@map("resume_extractions")
+}
+
+enum FilePurpose {
+  ATTACHMENT
+  TEMPLATE
+}
+
+// ---------------------------------------------------------------------------
+// Client templates (original file stays unchanged in object storage)
+// ---------------------------------------------------------------------------
+
+enum TemplateStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+model ClientTemplate {
+  id             String         @id @default(cuid())
+  userId         String
+  /// The uploaded source file (purpose TEMPLATE). Never modified.
+  uploadedFileId String         @unique
+  name           String         @db.VarChar(100)
+  /// Lower-cased name for per-user uniqueness ("Client A" == "client a").
+  nameKey        String         @db.VarChar(100)
+  status         TemplateStatus @default(PROCESSING)
+  /// AI-derived structure, validated with clientTemplateStructureSchema before storage.
+  structure      Json?
+  /// Layout digest + text sent for analysis (capped), kept for re-analysis.
+  extractedText  String?
+  /// Model that produced `structure` (e.g. mimo-v2.6-pro).
+  analyzedBy     String?
+  /// Internal failure code; mapped to safe messages.
+  failureCode    String?
+  startedAt      DateTime       @default(now())
+  completedAt    DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  uploadedFile   UploadedFile    @relation(fields: [uploadedFileId], references: [id], onDelete: Cascade)
+  conversations  Conversation[]
+  formattingJobs FormattingJob[]
+
+  @@unique([userId, nameKey])
+  @@index([userId, createdAt])
+  @@map("client_templates")
+}
+
+// ---------------------------------------------------------------------------
+// Resume formatting (READY resume + READY template → AI plan → DOCX in storage)
+// ---------------------------------------------------------------------------
+
+enum FormattingJobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+/// One request to format a resume with a client template. Processing runs in
+/// the app process (no durable queue); each run's `startedAt` is its claim
+/// token, so an older run can never overwrite a newer one.
+model FormattingJob {
+  id                  String              @id @default(cuid())
+  userId              String
+  /// The resume: an uploaded file with a READY extraction. Null if deleted later.
+  resumeFileId        String?
+  clientTemplateId    String?
+  /// Chat the job was started from (job cards are shown in that conversation).
+  conversationId      String?
+  status              FormattingJobStatus @default(QUEUED)
+  /// "{resumeFileId}:{clientTemplateId}" while QUEUED/PROCESSING, otherwise
+  /// null. Unique, so only one active job can exist per resume + template.
+  activeKey           String?             @unique
+  /// The validated, completed FormattingPlan (never unvalidated AI output).
+  plan                Json?
+  /// User-facing notes (e.g. content that was placed automatically).
+  warnings            Json?
+  /// Internal failure code; mapped to safe messages.
+  failureCode         String?
+  /// Number of processing runs started (first run + retries).
+  attempts            Int                 @default(0)
+  /// Formatting engine (plan rules + renderer) version that produced the result.
+  engineVersion       Int
+  /// Model that produced the plan (e.g. mimo-v2.6-pro).
+  aiModel             String?
+  /// Inputs used: resume parser version / extraction time, template analysis time.
+  resumeParserVersion Int?
+  resumeExtractedAt   DateTime?
+  templateAnalyzedAt  DateTime?
+  /// Claim token of the current run.
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  resumeFile     UploadedFile?      @relation(fields: [resumeFileId], references: [id], onDelete: SetNull)
+  clientTemplate ClientTemplate?    @relation(fields: [clientTemplateId], references: [id], onDelete: SetNull)
+  conversation   Conversation?      @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  document       GeneratedDocument?
+
+  @@index([userId, createdAt])
+  @@index([conversationId, createdAt])
+  @@map("formatting_jobs")
+}
+
+/// A generated output file. Bytes live in private object storage; only metadata is stored here.
+model GeneratedDocument {
+  /// Server-generated (also part of the storage key).
+  id              String   @id
+  userId          String
+  formattingJobId String   @unique
+  /// Server-generated object key: users/{userId}/generated/{id}.docx
+  storageKey      String   @unique
+  /// Sanitised download name.
+  filename        String   @db.VarChar(255)
+  mimeType        String
+  sizeBytes       Int
+  createdAt       DateTime @default(now())
+
+  user User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  job  FormattingJob @relation(fields: [formattingJobId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("generated_documents")
+}

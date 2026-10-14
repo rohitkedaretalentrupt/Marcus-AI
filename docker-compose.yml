@@ -1,0 +1,54 @@
+# Local development services. The credentials below are for local use only
+# and match DATABASE_URL in .env.example. Never reuse them in production.
+#
+#   docker compose up -d db              # PostgreSQL only (run the app with `npm run dev`)
+#   docker compose --profile app up -d   # PostgreSQL + production app image
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: resume_app
+      POSTGRES_PASSWORD: resume_app_dev_password
+      POSTGRES_DB: resume_app
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resume_app -d resume_app"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    profiles: ["app"]
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://resume_app:resume_app_dev_password@db:5432/resume_app?schema=public
+      APP_URL: http://localhost:3000
+      # Read from your local .env (compose interpolation); never hard-code them here.
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env}
+      AI_PROVIDER: ${AI_PROVIDER:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_TIMEOUT_MS: ${AI_TIMEOUT_MS:-60000}
+      AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-4096}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      # The production image refuses to start without AI + storage unless this is "true".
+      ALLOW_DISABLED_SERVICES: ${ALLOW_DISABLED_SERVICES:-false}
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  postgres-data:

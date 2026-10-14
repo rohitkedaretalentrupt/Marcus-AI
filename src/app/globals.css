@@ -1,0 +1,448 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Design tokens (shadcn/ui convention) in the HireTalent brand palette:
+ * black, white and one red, in a light and a dark theme. Dark (white on
+ * black, like the logo) is the default; the theme toggle switches the
+ * `.dark` class on <html> (see src/lib/theme.ts).
+ *
+ * Contrast (WCAG): black/white 21:1; muted text 7.8:1 (light) / 8.6:1 (dark);
+ * the red #ec0a14 passes AA as white-on-red (4.55:1), red-on-white (4.55:1)
+ * and red-on-black (4.62:1).
+ */
+:root {
+  --radius: 0.5rem;
+  color-scheme: light;
+
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --card: #ffffff;
+  --card-foreground: #0a0a0a;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0a;
+  --primary: #ec0a14;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f2f2;
+  --secondary-foreground: #0a0a0a;
+  --muted: #f5f5f5;
+  --muted-foreground: #525252;
+  --accent: #ededed;
+  --accent-foreground: #0a0a0a;
+  --destructive: #ec0a14;
+  --destructive-foreground: #ffffff;
+  --border: #e5e5e5;
+  --input: #d4d4d4;
+  --ring: #ec0a14;
+
+  /* Safe-area insets (notch, home indicator). Requires viewport-fit=cover. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+
+  --header-height: 3.5rem;
+}
+
+.dark {
+  color-scheme: dark;
+
+  --background: #000000;
+  --foreground: #ffffff;
+  --card: #0a0a0a;
+  --card-foreground: #ffffff;
+  --popover: #111111;
+  --popover-foreground: #ffffff;
+  --primary: #ec0a14;
+  --primary-foreground: #ffffff;
+  --secondary: #1a1a1a;
+  --secondary-foreground: #ffffff;
+  --muted: #141414;
+  --muted-foreground: #a3a3a3;
+  --accent: #1f1f1f;
+  --accent-foreground: #ffffff;
+  --destructive: #ec0a14;
+  --destructive-foreground: #ffffff;
+  --border: #2a2a2a;
+  --input: #3a3a3a;
+  --ring: #ec0a14;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --spacing-header: var(--header-height);
+  --spacing-safe-top: var(--safe-top);
+  --spacing-safe-bottom: var(--safe-bottom);
+  --spacing-safe-left: var(--safe-left);
+  --spacing-safe-right: var(--safe-right);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    /* Stops iOS from inflating text in landscape. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-background font-sans text-foreground antialiased;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    overscroll-behavior-y: none;
+  }
+
+  /*
+   * iOS Safari zooms into inputs with font-size < 16px. Keep form controls at
+   * 16px on small screens; larger screens may use the normal scale.
+   */
+  input,
+  select,
+  textarea {
+    font-size: max(16px, 1em);
+  }
+
+  @media (min-width: 768px) {
+    input,
+    select,
+    textarea {
+      font-size: inherit;
+    }
+  }
+}
+
+@utility pt-safe {
+  padding-top: var(--safe-top);
+}
+
+@utility pb-safe {
+  padding-bottom: var(--safe-bottom);
+}
+
+@utility px-safe {
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
+/* Minimum comfortable touch target (WCAG 2.5.5 / Apple HIG ≈ 44px). */
+@utility touch-target {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* --- Assistant replies (Markdown) ------------------------------------------ */
+@layer components {
+  .markdown {
+    line-height: 1.75;
+    overflow-wrap: anywhere;
+  }
+  .markdown > * + * {
+    margin-top: 0.75rem;
+  }
+  /* Single line breaks in a paragraph stay line breaks (plain-text replies). */
+  .markdown p {
+    white-space: pre-line;
+  }
+  .markdown :is(h1, h2, h3, h4, h5, h6) {
+    font-weight: 600;
+    line-height: 1.4;
+    margin-top: 1.25rem;
+  }
+  .markdown > :is(h1, h2, h3, h4, h5, h6):first-child {
+    margin-top: 0;
+  }
+  .markdown h1 {
+    font-size: 1.25rem;
+  }
+  .markdown h2 {
+    font-size: 1.125rem;
+  }
+  .markdown :is(h3, h4, h5, h6) {
+    font-size: 1rem;
+  }
+  .markdown ul {
+    list-style: disc;
+    padding-left: 1.5rem;
+  }
+  .markdown ol {
+    list-style: decimal;
+    padding-left: 1.5rem;
+  }
+  .markdown li + li,
+  .markdown li > :is(ul, ol) {
+    margin-top: 0.25rem;
+  }
+  .markdown li::marker {
+    color: var(--muted-foreground);
+  }
+  .markdown strong {
+    font-weight: 600;
+  }
+  .markdown a {
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .markdown blockquote {
+    border-left: 2px solid var(--border);
+    padding-left: 0.875rem;
+    color: var(--muted-foreground);
+  }
+  .markdown hr {
+    border-top: 1px solid var(--border);
+  }
+  .markdown code {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.875em;
+    border-radius: 0.25rem;
+    background: var(--muted);
+    padding: 0.1rem 0.3rem;
+  }
+  .markdown pre {
+    overflow-x: auto;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border);
+    background: var(--muted);
+    padding: 0.75rem 1rem;
+    line-height: 1.6;
+    overflow-wrap: normal;
+  }
+  .markdown pre code {
+    background: transparent;
+    padding: 0;
+    font-size: 0.8125rem;
+    white-space: pre;
+  }
+  .markdown-table {
+    overflow-x: auto;
+  }
+  .markdown table {
+    border-collapse: collapse;
+    font-size: 0.875rem;
+  }
+  .markdown :is(th, td) {
+    border: 1px solid var(--border);
+    padding: 0.375rem 0.625rem;
+    text-align: left;
+  }
+
+  /* Blinking caret at the end of a reply that is still arriving. */
+  .markdown-streaming > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
+  .markdown-streaming > :is(ul, ol):last-child > li:last-child::after,
+  .markdown-streaming:empty::after {
+    content: "";
+    display: inline-block;
+    width: 0.5em;
+    height: 1em;
+    margin-left: 0.15em;
+    vertical-align: -0.15em;
+    border-radius: 1px;
+    background: currentColor;
+    animation: caret-blink 1s steps(2, start) infinite;
+  }
+
+  /* "Thinking…": a light sweeping across the text. */
+  .thinking-shimmer {
+    background: linear-gradient(
+        90deg,
+        var(--muted-foreground) 0%,
+        var(--muted-foreground) 40%,
+        var(--foreground) 50%,
+        var(--muted-foreground) 60%,
+        var(--muted-foreground) 100%
+      )
+      0 0 / 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: thinking-shimmer 1.6s linear infinite;
+  }
+}
+
+@keyframes caret-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+@keyframes thinking-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .markdown-streaming *::after,
+  .markdown-streaming::after {
+    animation: none;
+  }
+  .thinking-shimmer {
+    animation: none;
+    background: none;
+    color: var(--muted-foreground);
+  }
+}
+
+/* --- Formatting job card ------------------------------------------------------ */
+@layer components {
+  /* A little page whose lines are written one after another, on a loop. */
+  .formatting-doc {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    width: 2.25rem;
+    height: 2.75rem;
+    flex-shrink: 0;
+    padding: 0 0.4rem;
+    border: 1.5px solid var(--primary);
+    border-radius: 0.375rem;
+    background: var(--background);
+    overflow: hidden;
+  }
+  .formatting-doc > span {
+    display: block;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--primary);
+    transform-origin: left center;
+    animation: doc-line 2.4s ease-in-out infinite;
+  }
+  .formatting-doc > span:nth-child(1) {
+    width: 70%;
+  }
+  .formatting-doc > span:nth-child(2) {
+    animation-delay: 0.3s;
+  }
+  .formatting-doc > span:nth-child(3) {
+    width: 85%;
+    animation-delay: 0.6s;
+  }
+  .formatting-doc > span:nth-child(4) {
+    width: 55%;
+    animation-delay: 0.9s;
+  }
+
+  /* Indeterminate progress: a bar sweeping across the track. */
+  .formatting-progress {
+    position: relative;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 9999px;
+    background: var(--muted);
+  }
+  .formatting-progress > span {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 40%;
+    border-radius: 9999px;
+    background: var(--primary);
+    animation: progress-sweep 1.4s ease-in-out infinite;
+  }
+
+  /* The finished card settles in once. */
+  .formatting-done {
+    animation: card-done 0.4s ease-out;
+  }
+}
+
+@keyframes doc-line {
+  0% {
+    transform: scaleX(0);
+    opacity: 0.35;
+  }
+  35%,
+  80% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleX(1);
+    opacity: 0.35;
+  }
+}
+
+@keyframes progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@keyframes card-done {
+  from {
+    transform: scale(0.98);
+    opacity: 0.6;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .formatting-doc > span,
+  .formatting-done {
+    animation: none;
+  }
+  .formatting-progress > span {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
+/* --- Generated resume preview (docx-preview output) ------------------------- */
+/* Not in a layer: docx-preview injects unlayered styles, which would win over layered ones. */
+.resume-preview .docx-wrapper {
+  background: transparent;
+  padding: 12px 8px;
+  align-items: center;
+}
+.resume-preview .docx-wrapper > section.docx {
+  margin-bottom: 12px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+}
+/* Dark theme: the white page is shown dark, colours keep their hue. */
+.dark .resume-preview .docx-wrapper > section.docx {
+  filter: invert(1) hue-rotate(180deg);
+  box-shadow: 0 0 0 1px var(--border);
+}
