@@ -130,7 +130,11 @@ function kindOfHeading(heading: string): string | null {
 
 /** Skills-like sections may share a template list (e.g. "Skills & Certifications"). */
 function compatibleKinds(headingKind: string, sectionKind: string): boolean {
-  if (headingKind === sectionKind || sectionKind === "custom") return true;
+  if (headingKind === sectionKind) return true;
+  // A section with a title of its own ("Additional Information", "Leadership") does
+  // not belong under another kind of heading (Education, Skills, …): it goes to
+  // the end instead of being shown under the wrong heading.
+  if (sectionKind === "custom") return false;
   if (headingKind === "tools") return sectionKind === "skills";
   const listLike = new Set(["skills", "certifications", "languages"]);
   return headingKind === "skills" && listLike.has(sectionKind);
@@ -1147,9 +1151,16 @@ export function finalizeFillPlan(
   // is not static wording — or that contains a sample value the template
   // analysis found ("Lauren Wentworth") — is sample content and is removed.
   const sampleTexts = sampleValues(samples).map((sample) => sample.toLowerCase());
+  // A line that is just a section heading ("Education", even in plain type) is the
+  // template's own wording, never the sample person's content.
+  const isSectionHeading = (text: string) =>
+    text.length <= 40 && !/\d/.test(text) && kindOfHeading(text) !== null;
   const isSample = (text: string, bold: boolean) => {
     const lower = text.toLowerCase();
-    return !isLabelLike(text, bold) || sampleTexts.some((sample) => lower.includes(sample));
+    return (
+      (!isLabelLike(text, bold) && !isSectionHeading(text)) ||
+      sampleTexts.some((sample) => lower.includes(sample))
+    );
   };
   const groupParagraphs = new Set(groups.flatMap((group) => group.blocks));
   // Unfilled paragraphs inside a repeat group are checked too (a sample
@@ -1238,7 +1249,7 @@ export function finalizeFillPlan(
       if (block.kind !== "paragraph" || protectedIds.has(block.id)) break;
       if (
         !block.empty &&
-        isLabelLike(block.text, false) &&
+        (isLabelLike(block.text, false) || isSectionHeading(block.text)) &&
         !inlineLabel(block.text) &&
         (paragraphTextCount.get(block.text) ?? 0) < 2
       ) {

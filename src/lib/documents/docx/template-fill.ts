@@ -810,7 +810,16 @@ class Filler {
     // Items from the same section share one label.
     let previous: string | null = null;
     for (const item of items) {
-      if (item.label !== previous) body.nodes.push(label(item.label));
+      // (A section itself titled "Additional Information" would repeat the heading above.)
+      const title =
+        item.label.trim().toLowerCase() === ADDITIONAL_HEADING.toLowerCase()
+          ? "Other details"
+          : item.label;
+      if (item.label !== previous) {
+        // A new label after a list gets the template's blank line above it.
+        if (previous !== null && spacer) body.nodes.push({ ...spacer, id: "extra", atoms: [] });
+        body.nodes.push(label(title));
+      }
       previous = item.label;
       for (const line of item.lines) body.nodes.push(bullet(line));
     }

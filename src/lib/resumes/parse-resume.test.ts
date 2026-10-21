@@ -141,6 +141,57 @@ Built a repeatable release framework with readiness gates, SIT/UAT, and cutover 
     ]);
   });
 
+  it("splits a skills list separated by two-space gaps across wrapped lines, keeping wrapped items whole", () => {
+    const text = [
+      "Pat Example",
+      "pat@example.test",
+      "Skills",
+      "Stand-up forklift operation  Safe work practices  Computer operation  Order",
+      "Picker  Microsoft Word  Shipping &",
+      "Receiving  Warehouse safety compliance  Forklift  - Forklift experience (6–10 years)",
+    ].join("\n");
+    const skills = parseResumeText(text).content.sections.find((s) => s.title === "Skills")!;
+    expect(skills.entries[0]!.bullets).toEqual([
+      "Stand-up forklift operation",
+      "Safe work practices",
+      "Computer operation",
+      "Order Picker",
+      "Microsoft Word",
+      "Shipping & Receiving",
+      "Warehouse safety compliance",
+      "Forklift",
+      "Forklift experience (6–10 years)",
+    ]);
+  });
+
+  it("reads languages, interests and additional information as lists, and certifications one per line", () => {
+    const text = [
+      "Pat Example",
+      "pat@example.test",
+      "Languages",
+      "English - Intermediate",
+      "Spanish",
+      "Certifications and Licenses",
+      "Forklift Certification",
+      "Pallet Jack Certification",
+      "Driver's License",
+      "Additional Information",
+      "Authorized to work in the US for any employer",
+    ].join("\n");
+    const sections = parseResumeText(text).content.sections;
+    expect(sections.find((s) => s.title === "Languages")!.entries).toEqual([
+      { bullets: ["English - Intermediate", "Spanish"] },
+    ]);
+    expect(
+      sections
+        .find((s) => s.title === "Certifications and Licenses")!
+        .entries.map((e) => e.heading),
+    ).toEqual(["Forklift Certification", "Pallet Jack Certification", "Driver's License"]);
+    expect(sections.find((s) => s.title === "Additional Information")!.entries).toEqual([
+      { bullets: ["Authorized to work in the US for any employer"] },
+    ]);
+  });
+
   it("recognises ALL-CAPS headings and unknown custom sections", () => {
     const { content } = parseResumeText(`
 JOHN SMITH

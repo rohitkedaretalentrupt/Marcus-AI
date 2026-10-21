@@ -839,6 +839,139 @@ describe("DOCX template fill engine", () => {
     expect(text).toMatch(/Additional Information\n(?:[^\n]*\n)*•? ?A detail with no place/);
   });
 
+  it("keeps a plain-type section heading the plan did not mention, and does not sweep it away after a repeated job", async () => {
+    const { Document, Packer, Paragraph, TextRun, LevelFormat, AlignmentType } =
+      await import("docx");
+    const bold = (text: string) => new Paragraph({ children: [new TextRun({ text, bold: true })] });
+    const bullet = (text: string) =>
+      new Paragraph({ numbering: { reference: "dots", level: 0 }, text });
+    const template = new Uint8Array(
+      await Packer.toBuffer(
+        new Document({
+          numbering: {
+            config: [
+              {
+                reference: "dots",
+                levels: [
+                  {
+                    level: 0,
+                    format: LevelFormat.BULLET,
+                    text: "•",
+                    alignment: AlignmentType.LEFT,
+                  },
+                ],
+              },
+            ],
+          },
+          sections: [
+            {
+              children: [
+                bold("Pat Example-Sample"),
+                bold("Experience:"),
+                bold("Sample Corp"),
+                bullet("Sample duty one"),
+                new Paragraph(""),
+                // Plain type, like many templates' "Education" heading.
+                new Paragraph("Education"),
+                bullet("Sample University"),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    const blocks = await readTemplateBlocks(template);
+    const { paragraph } = ids(blocks);
+    const raw = aiFillPlanSchema.parse({
+      version: 1,
+      fills: [
+        { block: paragraph("Pat Example"), refs: ["contact.fullName"] },
+        { block: paragraph("Sample Corp"), refs: ["entry.subheading"] },
+        { block: paragraph("Sample duty"), refs: ["entry.text"] },
+        { block: paragraph("Sample University"), refs: ["s2.e0.heading"] },
+      ],
+      groups: [
+        {
+          source: "s0",
+          per: "entry",
+          blocks: [paragraph("Sample Corp"), paragraph("Sample duty")],
+        },
+      ],
+    });
+    const { plan } = finalizeFillPlan(raw, RESUME, blocks, source);
+    const filled = await fillDocxTemplate(template, plan, contentShownByFillPlan(RESUME, plan));
+    const text = await textOf(filled.data);
+    expect(text).toMatch(/\nEducation\n/);
+    expect(text).toContain("High school diploma");
+    expect(text).not.toMatch(/Sample/);
+  });
+
+  it("keeps a section with a title of its own out from under another heading (it goes to Additional Information)", async () => {
+    const { Document, Packer, Paragraph, TextRun, LevelFormat, AlignmentType } =
+      await import("docx");
+    const bold = (text: string) => new Paragraph({ children: [new TextRun({ text, bold: true })] });
+    const template = new Uint8Array(
+      await Packer.toBuffer(
+        new Document({
+          numbering: {
+            config: [
+              {
+                reference: "dots",
+                levels: [
+                  {
+                    level: 0,
+                    format: LevelFormat.BULLET,
+                    text: "•",
+                    alignment: AlignmentType.LEFT,
+                  },
+                ],
+              },
+            ],
+          },
+          sections: [
+            {
+              children: [
+                bold("Pat Example-Sample"),
+                bold("Education"),
+                new Paragraph({
+                  numbering: { reference: "dots", level: 0 },
+                  text: "Sample University",
+                }),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    const blocks = await readTemplateBlocks(template);
+    const { paragraph } = ids(blocks);
+    const content: ResumeContent = {
+      ...RESUME,
+      sections: [
+        ...RESUME.sections,
+        {
+          kind: "custom",
+          title: "Additional Information",
+          entries: [{ bullets: ["Authorized to work in the US"] }],
+        },
+      ],
+    };
+    const extra = content.sections.length - 1;
+    // The plan puts the "Additional Information" section under the Education heading.
+    const raw = aiFillPlanSchema.parse({
+      version: 1,
+      fills: [
+        { block: paragraph("Pat Example"), refs: ["contact.fullName"] },
+        { block: paragraph("Sample University"), refs: ["entry.item"] },
+      ],
+      groups: [{ source: `s${extra}`, per: "item", blocks: [paragraph("Sample University")] }],
+    });
+    const { plan, issues } = finalizeFillPlan(raw, content, blocks, source);
+    expect(issues.some((issue) => /sits under the heading "Education"/.test(issue))).toBe(true);
+    expect(plan.groups.some((group) => group.source === `s${extra}`)).toBe(false);
+    expect(plan.additional).toContain(`s${extra}.e0`);
+  });
+
   it("shows a single date column as the whole date range", async () => {
     const blocks = await readTemplateBlocks(await makeFormTemplateDocx());
     const raw = goodPlan(blocks);

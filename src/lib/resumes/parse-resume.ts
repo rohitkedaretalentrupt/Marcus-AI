@@ -14,7 +14,7 @@ import {
  * Bump PARSER_VERSION whenever the rules change so stored results can be
  * re-generated.
  */
-export const PARSER_VERSION = 4;
+export const PARSER_VERSION = 5;
 
 /** Below this many letters/digits the document is treated as having no text (e.g. a scan). */
 const MIN_TEXT_CHARS = 40;
@@ -260,13 +260,17 @@ function clamp(text: string, max: number, warnings: Set<string>): string {
 
 // --- normalisation ------------------------------------------------------------
 
-export function normalizeResumeText(raw: string): string[] {
+export function normalizeResumeText(raw: string, keepTwoSpaceGaps = false): string[] {
   return raw
     .replace(/\r\n?/g, "\n")
     .replace(/[​-‍﻿]/g, "")
     .replace(/[ \t]/g, " ")
     .split("\n")
-    .map((line) => line.replace(/ {2,}/g, (spaces) => (spaces.length >= 3 ? "   " : " ")).trim())
+    .map((line) =>
+      line
+        .replace(/ {2,}/g, (spaces) => (spaces.length >= 3 ? "   " : keepTwoSpaceGaps ? "  " : " "))
+        .trim(),
+    )
     .reduce<string[]>((lines, line) => {
       // Collapse runs of blank lines into one.
       if (line === "" && (lines.length === 0 || lines.at(-1) === "")) return lines;
@@ -336,7 +340,32 @@ function isSentenceLine(line: string): boolean {
   return lowercase >= 3;
 }
 
-function parseSkills(lines: string[]): ResumeEntry[] {
+/**
+ * PDFs often list skills with a gap of two spaces between them and no commas
+ * ("Forklift  Safe work practices  Order\nPicker  Excel"), the list wrapping
+ * anywhere. Such text is joined and cut at the gaps, so a wrapped item
+ * ("Order Picker") stays whole.
+ */
+function splitGapSeparated(lines: string[]): string[] | null {
+  const joined = lines
+    .map((line) => line.replace(BULLET, "").trim())
+    .filter(Boolean)
+    .join(" ");
+  const gaps = joined.match(/\S {2,}\S/g)?.length ?? 0;
+  const commas = joined.match(/,/g)?.length ?? 0;
+  if (gaps < 3 || gaps < commas) return null;
+  return joined
+    .split(/ {2,}/)
+    .map((item) => item.replace(/^[-–—]\s*/, "").trim())
+    .filter(Boolean);
+}
+
+function parseSkills(lines: string[], spacedLines: string[] = lines): ResumeEntry[] {
+  const gapItems = splitGapSeparated(spacedLines);
+  if (gapItems) {
+    const unique = [...new Set(gapItems)];
+    return unique.length ? [{ bullets: unique }] : [];
+  }
   const items: string[] = [];
   for (const raw of lines) {
     const line = raw.replace(BULLET, "").trim();
@@ -356,6 +385,35 @@ function parseSkills(lines: string[]): ResumeEntry[] {
   return unique.length ? [{ bullets: unique }] : [];
 }
 
+/**
+ * Certifications and licences are a list: each line is one entry ("Forklift
+ * Certification 2019"), not a heading with a subheading and a description.
+ */
+function parseCertifications(lines: string[]): ResumeEntry[] {
+  const entries: ResumeEntry[] = [];
+  for (const raw of lines) {
+    const line = raw.replace(BULLET, "").trim();
+    if (!line) continue;
+    const { text, startDate, endDate } = splitDates(line);
+    const dates = startDate || endDate ? { startDate, endDate } : {};
+    const last = entries.at(-1);
+    if (!text) {
+      if (last && !last.startDate && !last.endDate) Object.assign(last, dates);
+      continue;
+    }
+    if (last && isSentenceLine(text)) {
+      last.description = last.description ? `${last.description} ${text}` : text;
+      continue;
+    }
+    entries.push({ bullets: [], heading: text, ...dates });
+  }
+  return entries;
+}
+
+/** Sections that are plain lists of short items (languages, interests, …). */
+const LIST_TITLES =
+  /^(?:languages?|interests|hobbies|hobbies and interests|interests and hobbies|additional information)$/i;
+
 function paragraph(lines: string[]): string {
   return lines
     .map((line) => line.replace(BULLET, "").trim())
@@ -371,10 +429,13 @@ interface RawSection {
   kind: HeadingTarget["kind"];
   title: string;
   lines: string[];
+  /** The same lines with their two-space gaps kept (for gap-separated lists). */
+  spacedLines: string[];
 }
 
 export function parseResumeText(rawText: string): ParsedResume {
   const lines = normalizeResumeText(rawText);
+  const spaced = normalizeResumeText(rawText, true); // same lines, same order
   if (lines.join("").replace(/[^\p{L}\p{N}]/gu, "").length < MIN_TEXT_CHARS) {
     throw new NoExtractableTextError();
   }
@@ -383,12 +444,13 @@ export function parseResumeText(rawText: string): ParsedResume {
   const header: string[] = [];
   const sections: RawSection[] = [];
 
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     const heading = line ? matchHeading(line, sections.length > 0) : null;
     if (heading) {
-      sections.push({ kind: heading.kind, title: titleCase(line), lines: [] });
+      sections.push({ kind: heading.kind, title: titleCase(line), lines: [], spacedLines: [] });
     } else if (sections.length > 0) {
       sections.at(-1)!.lines.push(line);
+      sections.at(-1)!.spacedLines.push(spaced[index] ?? line);
     } else {
       header.push(line);
     }
@@ -448,8 +510,12 @@ export function parseResumeText(rawText: string): ParsedResume {
       if (text) summary = summary ? `${summary}\n\n${text}` : text;
       continue;
     }
-    const entries =
-      section.kind === "skills" ? parseSkills(section.lines) : parseEntries(section.lines);
+    const isList = section.kind === "skills" || LIST_TITLES.test(section.title);
+    const entries = isList
+      ? parseSkills(section.lines, section.spacedLines)
+      : section.kind === "certifications"
+        ? parseCertifications(section.lines)
+        : parseEntries(section.lines);
     if (entries.length === 0) continue;
     builtSections.push({ kind: section.kind, title: section.title, entries });
   }
