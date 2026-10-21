@@ -86,6 +86,8 @@ export interface ResumeTaskInput {
   availableTemplates: string[];
   /** Template the user selected for this conversation, if any. */
   selectedTemplate?: string | null;
+  /** The user's first name, when the account has one (for the occasional personal touch). */
+  userFirstName?: string | null;
   /**
    * What the app did about formatting for the latest message. Absent: nothing
    * was started, and the reply must not claim otherwise.
@@ -93,6 +95,28 @@ export interface ResumeTaskInput {
   formatting?:
     | { status: "started"; templateName: string | null; resumeFilename: string | null }
     | { status: "not_started"; reason: string };
+}
+
+/** What the model needs to read the intent of one chat message. */
+export interface ChatIntentInput {
+  /** The user's latest message. */
+  instruction: string;
+  /** Recent turns, oldest first. */
+  history: ChatTurn[];
+  availableTemplates: string[];
+  selectedTemplate?: string | null;
+  /** A resume is attached in this conversation. */
+  hasResume: boolean;
+}
+
+/** What the person wants the app to do with the latest message. */
+export interface ChatIntent {
+  /** They ask (or agree) to format their resume into a client template now. */
+  format: boolean;
+  /** The templates they want, exactly as named in the available list, in order. */
+  templates: string[];
+  /** Names they used that match no available template. */
+  unmatched: string[];
 }
 
 /** A client template document, as layout evidence (never the raw file). */
@@ -123,6 +147,11 @@ export interface AIProvider {
    * request upstream (the abort reason is rethrown).
    */
   streamResumeTask(input: ResumeTaskInput, options?: AIRequestOptions): AsyncIterable<string>;
+  /**
+   * Reads what the latest chat message asks the app to do (format the resume,
+   * and into which templates) — in any language, with typos and nicknames.
+   */
+  classifyChatIntent(input: ChatIntentInput, options?: AIRequestOptions): Promise<ChatIntent>;
   /** Identifies a client template's sections, order, layout, typography and placeholders. */
   analyzeTemplate(
     input: AnalyzeTemplateInput,

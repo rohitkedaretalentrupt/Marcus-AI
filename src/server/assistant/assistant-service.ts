@@ -2,13 +2,19 @@ import "server-only";
 
 import { AIProviderError, type AIErrorKind } from "@/lib/ai/errors";
 import { getAIProvider } from "@/lib/ai/provider";
-import type { AIProvider, ChatTurn, ResumeContext, ResumeTaskInput } from "@/lib/ai/types";
+import type {
+  AIProvider,
+  ChatIntent,
+  ChatTurn,
+  ResumeContext,
+  ResumeTaskInput,
+} from "@/lib/ai/types";
 import type { ChatMessage } from "@/lib/chat/types";
 import { conversationIdSchema } from "@/lib/chat/validation";
 import { getDb } from "@/lib/db/client";
 import { resumeContentSchema } from "@/lib/documents/resume-content";
 import { AppError, ERROR_CODES, NotFoundError } from "@/lib/errors/app-error";
-import { looksLikeFormatRequest } from "@/lib/formatting/chat-request";
+import { looksLikeFormatRequest, matchTemplateNames } from "@/lib/formatting/chat-request";
 import type { FormattingJobView } from "@/lib/formatting/types";
 import { EXTRACTION_FAILURES, type ExtractionFailureCode } from "@/lib/resumes/types";
 import { addAssistantMessage, replyConflict } from "@/server/chat/conversation-service";
@@ -43,6 +49,7 @@ const defaultDeps: AssistantDeps = {
 };
 
 const HISTORY_MESSAGES = 40;
+const STARTED_HISTORY_MESSAGES = 0;
 const EXTRACTION_POLL_MS = 1_000;
 
 /** In-process guard against concurrent replies (single app instance; see README). */
@@ -210,6 +217,25 @@ export interface AssistantReplyStream {
   release: () => void;
 }
 
+/** Recent messages the intent reader sees, and how long it may take before the wording rules decide. */
+const INTENT_HISTORY_MESSAGES = 6;
+const INTENT_TIMEOUT_MS = 10_000;
+
+/** What the model writes, after a formatting start, when a message needs no words back. */
+const NO_REPLY_MARKER = "[NO_REPLY]";
+
+/** The account's first name, if it has one (for the occasional personal touch). */
+async function firstNameOf(userId: string): Promise<string | null> {
+  try {
+    const user = await getDb().user.findUnique({ where: { id: userId }, select: { name: true } });
+    const first = user?.name?.trim().split(/\s+/)[0] ?? "";
+    // Only a plain name: nothing odd gets into the prompt.
+    return /^[\p{L}][\p{L}'’.-]{0,29}$/u.test(first) ? first : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Starts the assistant's reply to the newest (USER) message of the user's own
  * conversation. Everything that can fail up front (not found, already
@@ -252,8 +278,10 @@ export async function startAssistantReply(
   let input: ResumeTaskInput;
   let formatting: ResumeTaskInput["formatting"];
   let formattingJob: FormattingJobView | null = null;
+  let userFirstName: string | null = null;
   try {
     provider = deps.getProvider(); // 503 if AI is not configured
+    userFirstName = await firstNameOf(userId);
 
     // A resume attached a moment ago may still be extracting; wait briefly.
     const deadline = Date.now() + deps.extractionWaitMs;
@@ -272,24 +300,78 @@ export async function startAssistantReply(
     const names = attachmentNames(latest);
     const templates = await templateContextFor(userId, id);
 
-    // A format request ("Format my resume using Zillow", or "yes" to a reply
-    // that offered it) starts the job now; the model is told the outcome.
+    // Does this message ask for formatting? The model reads it (any language,
+    // typos, nicknames, a "yes" to an offer) and says which templates; if that
+    // step is unavailable, plain wording rules decide instead. A request starts
+    // the job now, and the reply model is told the outcome.
     const previousReply = earlier[0]?.role === "ASSISTANT" ? earlier[0].content : null;
+    const attachedResumes = collectResumes(conversation.messages);
+    let intent: ChatIntent | null = null;
     if (
       deps.startFormatting &&
       !signal.aborted &&
-      looksLikeFormatRequest(latest.content, {
-        previousReply,
-        templateNames: templates.availableTemplates,
-      })
+      templates.availableTemplates.length > 0 &&
+      attachedResumes.length > 0
     ) {
-      const outcome = await deps.startFormatting(userId, id, latest.content, previousReply);
+      try {
+        intent = await provider.classifyChatIntent(
+          {
+            instruction: latest.content,
+            history: earlier
+              .slice(0, INTENT_HISTORY_MESSAGES)
+              .reverse()
+              .map(toTurn)
+              .filter((turn): turn is ChatTurn => turn !== null),
+            availableTemplates: templates.availableTemplates,
+            selectedTemplate: templates.selectedTemplate,
+            hasResume: true,
+          },
+          { signal: AbortSignal.any([signal, AbortSignal.timeout(INTENT_TIMEOUT_MS)]) },
+        );
+      } catch {
+        intent = null; // the wording rules below take over
+      }
+    }
+    const wantsFormatting =
+      intent !== null
+        ? intent.format
+        : looksLikeFormatRequest(latest.content, {
+            previousReply,
+            templateNames: templates.availableTemplates,
+          });
+    if (deps.startFormatting && !signal.aborted && wantsFormatting) {
+      const known = new Set(templates.availableTemplates.map((name) => name.toLowerCase()));
+      let named = (intent?.templates ?? []).filter((name) => known.has(name.trim().toLowerCase()));
+      // Safety net: when the message itself names some of the templates the model
+      // returned, only those are started — never one that came from older turns.
+      const inMessage = matchTemplateNames(latest.content, templates.availableTemplates).map(
+        (name) => name.toLowerCase(),
+      );
+      const mentioned = named.filter((name) => inMessage.includes(name.toLowerCase()));
+      if (mentioned.length > 0) named = mentioned;
+      const outcome: Awaited<ReturnType<typeof startChatFormatting>> =
+        intent && named.length === 0 && intent.unmatched.length > 0
+          ? {
+              status: "not_started",
+              reason: `No client template matches ${intent.unmatched.map((name) => `"${name}"`).join(", ")}. The templates are: ${templates.availableTemplates.join(", ")}.`,
+            }
+          : await deps.startFormatting(
+              userId,
+              id,
+              latest.content,
+              previousReply,
+              named.length > 0 ? named : undefined,
+            );
       if (outcome.status === "started") formattingJob = outcome.job;
       formatting =
         outcome.status === "started"
           ? {
               status: "started",
-              templateName: outcome.job.template?.name ?? null,
+              templateName:
+                outcome.jobs
+                  .map((started) => started.template?.name)
+                  .filter(Boolean)
+                  .join(", ") || null,
               resumeFilename: outcome.job.resume?.filename ?? null,
             }
           : outcome;
@@ -300,13 +382,17 @@ export async function startAssistantReply(
         [latest.content, names.length ? `(Attached: ${names.join(", ")})` : ""]
           .filter(Boolean)
           .join("\n") || "Please review the attached file.",
+      // After a formatting start the reply is about this one message: the app's own
+      // facts say what happened, and older assistant turns (which can hold mistakes the
+      // model would repeat) stay out entirely.
       history: earlier
-        .slice(0, HISTORY_MESSAGES)
+        .slice(0, formatting?.status === "started" ? STARTED_HISTORY_MESSAGES : HISTORY_MESSAGES)
         .reverse()
         .map(toTurn)
         .filter((turn): turn is ChatTurn => turn !== null),
       resumes: collectResumes(conversation.messages),
       ...templates,
+      ...(userFirstName ? { userFirstName } : {}),
       ...(formatting ? { formatting } : {}),
     };
   } catch (error) {
@@ -316,18 +402,32 @@ export async function startAssistantReply(
 
   async function* run(): AsyncGenerator<AssistantReplyEvent, void, undefined> {
     try {
-      if (formattingJob) {
-        yield { type: "formatting", job: formattingJob };
-        // The progress card is the answer: no text is written or saved.
-        yield { type: "done", message: null };
-        return;
-      }
+      if (formattingJob) yield { type: "formatting", job: formattingJob };
       let text = "";
+      // After a formatting start the model decides whether anything needs saying:
+      // a bare command gets only the marker (and the progress card is the answer),
+      // anything a person would answer gets a line. Marker text is never shown.
+      let held = formattingJob ? "" : null;
       try {
         for await (const chunk of provider.streamResumeTask(input, { signal })) {
           if (signal.aborted) return;
           text += chunk;
-          yield { type: "delta", text: chunk };
+          if (held === null) {
+            yield { type: "delta", text: chunk };
+            continue;
+          }
+          held += chunk;
+          if (
+            NO_REPLY_MARKER.startsWith(held.trimStart()) ||
+            held.trimStart().startsWith(NO_REPLY_MARKER)
+          ) {
+            continue; // still possibly the marker
+          }
+          yield { type: "delta", text: held };
+          held = null;
+        }
+        if (held !== null && held && !text.trim().startsWith(NO_REPLY_MARKER)) {
+          yield { type: "delta", text: held };
         }
       } catch (error) {
         if (signal.aborted) return; // stopped by the user: nothing is saved
@@ -343,6 +443,11 @@ export async function startAssistantReply(
       if (signal.aborted) return;
 
       const content = text.trim();
+      if (formattingJob && content.startsWith(NO_REPLY_MARKER)) {
+        // Nothing to say: the progress card is the answer, and no text is saved.
+        yield { type: "done", message: null };
+        return;
+      }
       if (!content) {
         yield { type: "error", error: publicError(new AIProviderError("invalid_response", "")) };
         return;

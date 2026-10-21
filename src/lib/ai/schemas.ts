@@ -29,6 +29,12 @@ export const resumeTaskOutputSchema = z.object({
   reply: z.string().trim().min(1).max(8000),
 });
 
+export const chatIntentSchema = z.object({
+  format: z.boolean(),
+  templates: z.array(z.string().trim().min(1).max(200)).max(12).default([]),
+  unmatched: z.array(z.string().trim().min(1).max(200)).max(12).default([]),
+});
+
 export type ResumeAnalysis = z.infer<typeof resumeAnalysisSchema>;
 export type ResumeTaskIntent = (typeof RESUME_TASK_INTENTS)[number];
 export type ResumeTaskOutput = z.infer<typeof resumeTaskOutputSchema>;

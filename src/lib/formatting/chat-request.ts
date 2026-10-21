@@ -51,7 +51,7 @@ export function looksLikeFormatRequest(text: string, context: FormatRequestConte
   const message = text.trim();
   if (!message || message.length > MAX_FOLLOW_UP_CHARS || message.endsWith("?")) return false;
 
-  const namesTemplate = matchTemplateName(message, context.templateNames ?? []) !== null;
+  const namesTemplate = matchTemplateNames(message, context.templateNames ?? []).length > 0;
   if (offersFormatting(context.previousReply) && (AFFIRMATIVE.test(message) || namesTemplate)) {
     return true;
   }
@@ -76,6 +76,112 @@ export function requestedTemplateName(text: string): string | null {
   return candidate && !NOT_A_NAME.test(candidate) ? candidate : null;
 }
 
+/** Words of a message that never name a template. */
+const NOT_NAME_WORDS = new Set(
+  (
+    "format formats formatted formatting resume resumes template templates please also again " +
+    "using with this that them these those into like make give need want just same other another " +
+    "both each every done from your mine version style layout docx word file files new old " +
+    "for and the all them one more too now then here there where what which"
+  ).split(" "),
+);
+
+/** Edit distance between two short words (insert, delete, replace). */
+function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diagonal = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const above = row[j]!;
+      row[j] = Math.min(above + 1, row[j - 1]! + 1, diagonal + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diagonal = above;
+    }
+  }
+  return row[b.length]!;
+}
+
+/**
+ * Every template the message names, in the order mentioned: by full name,
+ * by one distinctive word of a longer name ("meridian" for "Meridian Health
+ * Systems"), or with a small typo ("ceredian" for "Ceridian"). A word that
+ * fits several templates equally well is not guessed.
+ */
+export function matchTemplateNames(text: string, names: readonly string[]): string[] {
+  const lower = text.toLowerCase();
+  const clean = names.filter((name) => name.trim());
+  const found: { name: string; at: number }[] = [];
+
+  // 1. Full names (a name inside a longer matched name does not count again).
+  const spans: { name: string; from: number; to: number }[] = [];
+  for (const name of clean) {
+    const needle = name.trim().toLowerCase();
+    const from = lower.indexOf(needle);
+    if (from !== -1) spans.push({ name, from, to: from + needle.length });
+  }
+  const exact = spans.filter(
+    (span) =>
+      !spans.some(
+        (other) =>
+          other !== span &&
+          other.from <= span.from &&
+          other.to >= span.to &&
+          other.to - other.from > span.to - span.from,
+      ),
+  );
+  for (const span of exact) found.push({ name: span.name, at: span.from });
+
+  // 2. Single words: one distinctive word of a name, or a close misspelling.
+  const tokens = clean.map((name) => ({
+    name,
+    words: name
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((word) => word.length >= 4),
+  }));
+  for (const match of lower.matchAll(/[a-z0-9]+/g)) {
+    const word = match[0];
+    const at = match.index ?? 0;
+    if (word.length < 4 || NOT_NAME_WORDS.has(word)) continue;
+    if (exact.some((span) => at >= span.from && at < span.to)) continue;
+
+    const same = tokens.filter((entry) =>
+      entry.words.some((part) => part === word || (word.length >= 5 && part.startsWith(word))),
+    );
+    let chosen: string | null = null;
+    if (same.length === 1) chosen = same[0]!.name;
+    else if (same.length === 0) {
+      const scored = tokens
+        .map((entry) => ({
+          name: entry.name,
+          distance: Math.min(
+            ...entry.words.map((part) =>
+              editDistance(word, part) <= (part.length >= 8 ? 2 : 1)
+                ? editDistance(word, part)
+                : Infinity,
+            ),
+          ),
+        }))
+        .filter((entry) => Number.isFinite(entry.distance))
+        .sort((a, b) => a.distance - b.distance);
+      if (scored.length > 0 && (scored.length === 1 || scored[0]!.distance < scored[1]!.distance))
+        chosen = scored[0]!.name;
+    }
+    if (chosen) found.push({ name: chosen, at });
+  }
+
+  const seen = new Set<string>();
+  return found
+    .sort((a, b) => a.at - b.at)
+    .filter((entry) => !seen.has(entry.name) && seen.add(entry.name))
+    .map((entry) => entry.name);
+}
+
+/** True for a bare go-ahead ("yes", "ok do it"): the only message that answers a reply's offer. */
+export function isAffirmative(text: string): boolean {
+  return AFFIRMATIVE.test(text.trim());
+}
+
 /** The longest template name mentioned in the text (case-insensitive), if any. */
 export function matchTemplateName(text: string, names: readonly string[]): string | null {
   const haystack = text.toLowerCase();
@@ -95,4 +201,6 @@ export const startChatFormattingSchema = z.strictObject({
   text: z.string().max(4000).optional(),
   /** The assistant reply the message answers ("Want me to use Zillow?" → "yes"). */
   previousReply: z.string().max(20_000).optional(),
+  /** Template names already worked out from the message (by the intent reader); exact names. */
+  templateNames: z.array(z.string().trim().min(1).max(200)).max(12).optional(),
 });

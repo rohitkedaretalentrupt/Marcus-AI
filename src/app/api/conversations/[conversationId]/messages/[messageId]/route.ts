@@ -1,6 +1,7 @@
 import { requireApiUser } from "@/lib/auth/session";
 import { deleteMessage, editMessage } from "@/server/chat/conversation-service";
 import { purgeDiscardedFiles } from "@/server/files/file-service";
+import { discardConversationJobsAfter } from "@/server/formatting/formatting-service";
 import { jsonOk, readJsonBody, withErrorHandling } from "@/server/http/route-handler";
 
 type Params = { conversationId: string; messageId: string };
@@ -19,6 +20,8 @@ export const PATCH = withErrorHandling<Params>(async (request, { params }) => {
     await readJsonBody(request),
   );
   await purgeDiscardedFiles(user.id, discardedFileIds);
+  // Resumes generated after the edited message are removed with everything else after it.
+  await discardConversationJobsAfter(user.id, conversationId, new Date(message.createdAt));
   return jsonOk(message);
 });
 

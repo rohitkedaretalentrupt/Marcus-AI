@@ -13,6 +13,7 @@ export function createFakeAIProvider(overrides: Partial<AIProvider> = {}): AIPro
     streamResumeTask: async function* () {
       throw new Error("Not used in this test");
     },
+    classifyChatIntent: unused,
     analyzeTemplate: unused,
     analyzeResume: unused,
     formatResume: unused,

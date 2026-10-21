@@ -9,11 +9,12 @@ import { aiFormattingPlanSchema } from "@/lib/formatting/plan";
 import { clientTemplateStructureSchema } from "@/lib/templates/structure";
 
 import { AIProviderError, parseModelJson } from "../../errors";
+import { buildChatIntentMessages } from "../../prompts/chat-intent-prompt";
 import { buildFillMessages } from "../../prompts/fill-prompt";
 import { buildFormattingMessages } from "../../prompts/formatting-prompt";
 import { buildResumeTaskMessages, type PromptMessage } from "../../prompts/resume-task-prompt";
 import { buildTemplateAnalysisMessages } from "../../prompts/template-analysis-prompt";
-import { resumeTaskOutputSchema } from "../../schemas";
+import { chatIntentSchema, resumeTaskOutputSchema } from "../../schemas";
 import type { AIProvider, AIRequestOptions } from "../../types";
 
 /** Documented defaults: https://mimo.mi.com/docs (OpenAI-compatible API). */
@@ -367,6 +368,10 @@ export function createMimoProvider(config: MimoConfig): AIProvider {
 
     streamResumeTask(input, options) {
       return streamCompletion(buildResumeTaskMessages(input, "markdown"), options);
+    },
+
+    classifyChatIntent(input, options) {
+      return completeValidated(buildChatIntentMessages(input), chatIntentSchema, options);
     },
 
     analyzeTemplate(input, options) {

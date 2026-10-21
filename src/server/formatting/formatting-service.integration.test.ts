@@ -622,6 +622,135 @@ describe.skipIf(!TEST_DATABASE_URL)("resume formatting (PostgreSQL, mocked AI)",
       expect(storage.objects.has(storage.putKeys[0]!)).toBe(false);
     });
   });
+  describe("resending an earlier message", () => {
+    it("removes the resumes generated after it (files included), stops running ones and leaves everything else", async () => {
+      const resume = await readyResume(alice);
+      const { conversation } = await chat.createConversation(alice, {
+        message: "Here is my resume",
+        attachmentFileIds: [resume.fileId],
+      });
+      const other = await chat.createConversation(alice, { message: "another chat" });
+      const t1 = await readyTemplate(alice, "Client A");
+      const t2 = await readyTemplate(alice, "Client B");
+      const t3 = await readyTemplate(alice, "Client C");
+      const make = async (templateId: string, conversationId: string) =>
+        (
+          await service.createFormattingJob(
+            alice,
+            { resumeFileId: resume.fileId, templateId },
+            deps(),
+            { conversationId },
+          )
+        ).job;
+
+      const before = await make(t1.templateId, conversation.id); // before the cut-off
+      await service.runFormattingJob(alice, before.id, deps());
+      const cutoff = new Date(Date.now() + 5);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const done = await make(t2.templateId, conversation.id);
+      await service.runFormattingJob(alice, done.id, deps());
+      const running = await make(t3.templateId, conversation.id); // still queued
+      const elsewhere = await make(t1.templateId, other.conversation.id); // another chat
+
+      const doneKey = (
+        await db.generatedDocument.findFirstOrThrow({ where: { formattingJobId: done.id } })
+      ).storageKey;
+      const beforeKey = (
+        await db.generatedDocument.findFirstOrThrow({ where: { formattingJobId: before.id } })
+      ).storageKey;
+      expect(storage.objects.has(doneKey)).toBe(true);
+
+      const removed = await service.discardConversationJobsAfter(
+        alice,
+        conversation.id,
+        cutoff,
+        deps(),
+      );
+      expect(removed).toBe(2);
+
+      const left = await db.formattingJob.findMany({
+        where: { userId: alice },
+        select: { id: true },
+      });
+      expect(left.map((job) => job.id).sort()).toEqual([before.id, elsewhere.id].sort());
+      expect(storage.objects.has(doneKey)).toBe(false); // its Word file is gone
+      expect(storage.objects.has(beforeKey)).toBe(true); // an earlier one is kept
+      // The stopped job can no longer run or save anything.
+      expect(await service.runFormattingJob(alice, running.id, deps())).toBeNull();
+      // Another user cannot remove anyone's resumes.
+      expect(
+        await service.discardConversationJobsAfter(bob, conversation.id, new Date(0), deps()),
+      ).toBe(0);
+    });
+  });
+
+  describe("stopping a job", () => {
+    it("stops a queued job: it ends as stopped, can be retried, and never runs", async () => {
+      const resume = await readyResume(alice);
+      const template = await readyTemplate(alice);
+      const job = await createJob(alice, resume.fileId, template.templateId);
+
+      const stopped = await service.cancelFormattingJob(alice, job.id);
+      expect(stopped).toMatchObject({ status: "FAILED", canRetry: true });
+      expect(stopped.failureMessage).toMatch(/Stopped/);
+      // A stopped job is not picked up, and the same resume + template can start again.
+      expect(await service.runFormattingJob(alice, job.id, deps())).toBeNull();
+      expect(calls).toHaveLength(0);
+      const { created } = await service.createFormattingJob(
+        alice,
+        { resumeFileId: resume.fileId, templateId: template.templateId },
+        deps(),
+      );
+      expect(created).toBe(true);
+    });
+
+    it("a run stopped midway saves nothing", async () => {
+      const resume = await readyResume(alice);
+      const template = await readyTemplate(alice);
+      const job = await createJob(alice, resume.fileId, template.templateId);
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const slow = createFakeAIProvider({
+        modelName: "fake-mimo",
+        analyzeTemplate: async () => structuredClone(SAMPLE_TEMPLATE_STRUCTURE) as never,
+        formatResume: async () => {
+          await gate;
+          const { aiFormattingPlanSchema } = await import("@/lib/formatting/plan");
+          return aiFormattingPlanSchema.parse(PLAN);
+        },
+      });
+
+      const running = service.runFormattingJob(alice, job.id, deps(slow));
+      await vi.waitFor(async () => {
+        expect((await db.formattingJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe(
+          "PROCESSING",
+        );
+      });
+      await service.cancelFormattingJob(alice, job.id);
+      release();
+      await running;
+
+      const row = await db.formattingJob.findUniqueOrThrow({
+        where: { id: job.id },
+        include: { document: true },
+      });
+      expect(row).toMatchObject({ status: "FAILED", failureCode: "cancelled", document: null });
+      expect(storage.objects.size).toBe(2); // only the uploaded resume and template remain
+    });
+
+    it("leaves a finished job alone, and only the owner can stop a job", async () => {
+      const resume = await readyResume(alice);
+      const template = await readyTemplate(alice);
+      const job = await createJob(alice, resume.fileId, template.templateId);
+      await service.runFormattingJob(alice, job.id, deps());
+
+      expect(await service.cancelFormattingJob(alice, job.id)).toMatchObject({
+        status: "COMPLETED",
+      });
+      await expect(service.cancelFormattingJob(bob, job.id)).rejects.toBeInstanceOf(NotFoundError);
+    });
+  });
+
   describe("formatting from the chat", () => {
     /** A chat whose first message carries the READY resume. */
     async function chatWithResume(userId: string, text = "Here is my resume") {
@@ -681,6 +810,52 @@ describe.skipIf(!TEST_DATABASE_URL)("resume formatting (PostgreSQL, mocked AI)",
         resume: { fileId: newer.fileId },
         template: { id: template.templateId },
       });
+    });
+
+    it("starts one job per template named in a message (typos and short names included)", async () => {
+      const { conversationId } = await chatWithResume(alice);
+      const bayer = await readyTemplate(alice, "Bayer");
+      const ceridian = await readyTemplate(alice, "Ceridian");
+      const meridian = await readyTemplate(alice, "Meridian Health Systems");
+
+      const started = await service.startFormattingsFromChat(
+        alice,
+        conversationId,
+        { text: "format for ceredian and meridian also" },
+        deps(),
+      );
+      expect(started.map((entry) => entry.job.template?.id)).toEqual([
+        ceridian.templateId,
+        meridian.templateId,
+      ]);
+      expect(started.some((entry) => entry.job.template?.id === bayer.templateId)).toBe(false);
+    });
+
+    it("never falls back to the template of the previous reply unless the message is a bare yes", async () => {
+      const { conversationId } = await chatWithResume(alice);
+      await readyTemplate(alice, "Bayer");
+      const previousReply = "Formatting is underway using the Bayer template. Want another one?";
+
+      // A message naming something that matches no template is not answered with Bayer.
+      await expect(
+        service.startFormattingFromChat(
+          alice,
+          conversationId,
+          { text: "format for zillowish", previousReply },
+          deps(),
+        ),
+      ).rejects.toMatchObject({
+        publicMessage: expect.stringMatching(/couldn't tell which client template/),
+      });
+
+      // "yes" does answer the offer in that reply.
+      const { job } = await service.startFormattingFromChat(
+        alice,
+        conversationId,
+        { text: "yes", previousReply },
+        deps(),
+      );
+      expect(job.template?.name).toBe("Bayer");
     });
 
     it("explains what is missing: no resume in this chat, no template, AI not configured", async () => {

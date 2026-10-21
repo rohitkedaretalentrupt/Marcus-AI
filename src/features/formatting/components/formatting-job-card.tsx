@@ -1,17 +1,21 @@
 "use client";
 
-import { Download, Eye, FileText, Loader2, RotateCw } from "lucide-react";
+import { Download, Eye, FileText, Loader2, RotateCw, Square } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { FormAlert } from "@/components/ui/form-alert";
 import { ApiRequestError } from "@/lib/api/client";
-import type { FormattingJobView } from "@/lib/formatting/types";
+import { FORMATTING_FAILURES, type FormattingJobView } from "@/lib/formatting/types";
 import { cn } from "@/lib/utils/cn";
 import { useIsClient } from "@/features/chat/hooks/use-is-client";
 
-import { downloadFormattedResume, retryFormattingJob } from "../lib/formatting-api";
+import {
+  cancelFormattingJob,
+  downloadFormattedResume,
+  retryFormattingJob,
+} from "../lib/formatting-api";
 import { ResumePreviewDialog } from "./resume-preview-dialog";
 
 /** Seconds since `since`, ticking every second (a real clock, not simulated progress). */
@@ -80,16 +84,17 @@ function candidateName(job: FormattingJobView): string | null {
 /** A formatting job as shown in the chat: client (template) and candidate name, Download; progress or Retry while not done. */
 export function FormattingJobCard({ job }: { job: FormattingJobView }) {
   const router = useRouter();
-  const [busy, setBusy] = useState<"download" | "retry" | null>(null);
+  const [busy, setBusy] = useState<"download" | "retry" | "stop" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const active = job.status === "QUEUED" || job.status === "PROCESSING";
 
-  async function run(action: "download" | "retry") {
+  async function run(action: "download" | "retry" | "stop") {
     setBusy(action);
     setError(null);
     try {
       if (action === "download") await downloadFormattedResume(job.id);
       if (action === "retry") await retryFormattingJob(job.id);
+      if (action === "stop") await cancelFormattingJob(job.id);
       if (action !== "download") router.refresh();
     } catch (caught) {
       setError(
@@ -181,6 +186,23 @@ export function FormattingJobCard({ job }: { job: FormattingJobView }) {
           <p className="truncate text-sm font-medium">{templateName}</p>
           {candidate ? <p className="truncate text-xs text-muted-foreground">{candidate}</p> : null}
         </div>
+        {active ? (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 shrink-0 gap-1.5 px-3 text-xs"
+            onClick={() => run("stop")}
+            disabled={busy !== null}
+            aria-label={`Stop formatting with ${templateName}`}
+          >
+            {busy === "stop" ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Square className="size-3 fill-current" aria-hidden="true" />
+            )}
+            Stop
+          </Button>
+        ) : null}
         {job.canRetry ? (
           <Button
             size="sm"
@@ -200,7 +222,18 @@ export function FormattingJobCard({ job }: { job: FormattingJobView }) {
       </div>
 
       {active ? <JobInProgress job={job} /> : null}
-      {job.failureMessage ? <p className="text-xs text-destructive">{job.failureMessage}</p> : null}
+      {job.failureMessage ? (
+        <p
+          className={cn(
+            "text-xs",
+            job.failureMessage === FORMATTING_FAILURES.cancelled
+              ? "text-muted-foreground"
+              : "text-destructive",
+          )}
+        >
+          {job.failureMessage}
+        </p>
+      ) : null}
       <FormAlert message={error} />
     </div>
   );

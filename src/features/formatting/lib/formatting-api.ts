@@ -24,6 +24,10 @@ export const startChatFormatting = (
 export const retryFormattingJob = (id: string) =>
   apiFetch<FormattingJobView>(`${formattingJobApi(id)}/retry`, { method: "POST" });
 
+/** Stops a queued or running job. */
+export const cancelFormattingJob = (id: string) =>
+  apiFetch<FormattingJobView>(`${formattingJobApi(id)}/cancel`, { method: "POST" });
+
 /** Fetches a short-lived signed URL and starts the download (the file is never public). */
 export async function downloadFormattedResume(id: string): Promise<void> {
   const { url } = await apiFetch<{ url: string; expiresAt: string; filename: string }>(

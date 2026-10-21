@@ -20,6 +20,7 @@ export const FORMATTING_FAILURES = {
     "The generated document didn't pass its quality checks, so it wasn't saved. Please try again.",
   storage_error: "The generated document couldn't be saved. Please try again.",
   stale: "This formatting job stopped unexpectedly. Please try again.",
+  cancelled: "Stopped. You can start it again whenever you like.",
   too_large:
     "This resume is too long to format automatically. Shorten it or split it into separate files.",
   internal: "Something went wrong while formatting this resume. Please try again.",

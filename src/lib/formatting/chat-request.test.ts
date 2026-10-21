@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { looksLikeFormatRequest, matchTemplateName, requestedTemplateName } from "./chat-request";
+import {
+  looksLikeFormatRequest,
+  matchTemplateName,
+  matchTemplateNames,
+  requestedTemplateName,
+} from "./chat-request";
 
 describe("looksLikeFormatRequest", () => {
   it.each([
@@ -73,6 +78,45 @@ describe("matchTemplateName", () => {
   it("returns null when no template is named", () => {
     expect(matchTemplateName("format my resume", names)).toBeNull();
     expect(matchTemplateName("anything", [])).toBeNull();
+  });
+});
+
+describe("matchTemplateNames", () => {
+  const names = [
+    "Bayer",
+    "Ceridian",
+    "Meridian Health Systems",
+    "Client A",
+    "Client A Executive",
+    "City of Hope",
+    "S & P",
+  ];
+
+  it("finds every template named, in order, even with typos or a short form of the name", () => {
+    expect(matchTemplateNames("format for ceredian and meridian also", names)).toEqual([
+      "Ceridian",
+      "Meridian Health Systems",
+    ]);
+    expect(matchTemplateNames("do it for bayer's", names)).toEqual(["Bayer"]);
+    expect(matchTemplateNames("Meridian, then Bayer", names)).toEqual([
+      "Meridian Health Systems",
+      "Bayer",
+    ]);
+  });
+
+  it("prefers the longest full name and an exact word over a near spelling", () => {
+    expect(matchTemplateNames("format with client a executive please", names)).toEqual([
+      "Client A Executive",
+    ]);
+    // "meridian" is a word of one template and one letter from another: the exact one wins.
+    expect(matchTemplateNames("use meridian", names)).toEqual(["Meridian Health Systems"]);
+  });
+
+  it("names nothing for ordinary words, and never guesses between equally close names", () => {
+    expect(matchTemplateNames("format my resume again please", names)).toEqual([]);
+    expect(matchTemplateNames("yes", names)).toEqual([]);
+    expect(matchTemplateNames("format for clien", ["Client A", "Client B"])).toEqual([]);
+    expect(matchTemplateNames("format for anything", [])).toEqual([]);
   });
 });
 

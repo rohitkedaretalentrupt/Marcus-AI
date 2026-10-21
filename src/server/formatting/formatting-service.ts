@@ -23,7 +23,9 @@ import { FILE_LIMITS } from "@/lib/files/limits";
 import { USABLE_FILE_STATUSES } from "@/lib/files/types";
 import { conversationIdSchema } from "@/lib/chat/validation";
 import {
+  isAffirmative,
   matchTemplateName,
+  matchTemplateNames,
   requestedTemplateName,
   startChatFormattingSchema,
 } from "@/lib/formatting/chat-request";
@@ -393,6 +395,27 @@ export async function retryFormattingJob(
   return toView(row);
 }
 
+/**
+ * Stops a queued or running job. The job ends as FAILED("cancelled") and can be
+ * retried. A run that is still going loses its claim, so it saves nothing.
+ * A job that has already finished is returned unchanged.
+ */
+export async function cancelFormattingJob(
+  userId: string,
+  jobId: unknown,
+): Promise<FormattingJobView> {
+  const id = parseJobId(jobId);
+  if (!id) throw jobNotFound();
+  const db = getDb();
+  await db.formattingJob.updateMany({
+    where: { id, userId, status: { in: ["QUEUED", "PROCESSING"] } },
+    data: { status: "FAILED", failureCode: "cancelled", activeKey: null, completedAt: new Date() },
+  });
+  const row = await db.formattingJob.findFirst({ where: { id, userId }, select: jobSelect });
+  if (!row) throw jobNotFound();
+  return toView(row);
+}
+
 /** Deletes a finished job and its generated document (object first, then rows). */
 export async function deleteFormattingJob(
   userId: string,
@@ -415,6 +438,47 @@ export async function deleteFormattingJob(
     if (isKeyOwnedBy(key, userId)) await deps.getStorage().delete(key);
   }
   await db.formattingJob.deleteMany({ where: { id, userId } });
+}
+
+/**
+ * Removes the resumes formatted in a conversation after `after` (when the
+ * user resends or edits an earlier message, what came after it goes — the
+ * generated resumes included). Running jobs are stopped first so they cannot
+ * save a result; the stored Word files and the job rows are deleted. Other
+ * conversations and other users are never touched.
+ */
+export async function discardConversationJobsAfter(
+  userId: string,
+  conversationId: unknown,
+  after: Date,
+  deps: Pick<FormattingDeps, "getStorage"> = defaultDeps,
+): Promise<number> {
+  const parsed = conversationIdSchema.safeParse(conversationId);
+  if (!parsed.success) return 0;
+  const db = getDb();
+  const jobs = await db.formattingJob.findMany({
+    where: { userId, conversationId: parsed.data, createdAt: { gt: after } },
+    select: { id: true, document: { select: { storageKey: true } } },
+  });
+  if (jobs.length === 0) return 0;
+  const ids = jobs.map((job) => job.id);
+  await db.formattingJob.updateMany({
+    where: { id: { in: ids }, userId, status: { in: ["QUEUED", "PROCESSING"] } },
+    data: { status: "FAILED", failureCode: "cancelled", activeKey: null, completedAt: new Date() },
+  });
+  for (const job of jobs) {
+    const key = job.document?.storageKey as StorageKey | undefined;
+    if (key && isKeyOwnedBy(key, userId)) {
+      await deps
+        .getStorage()
+        .delete(key)
+        .catch((error: unknown) => {
+          logger.warn("Removing a discarded resume failed", { jobId: job.id, error });
+        });
+    }
+  }
+  await db.formattingJob.deleteMany({ where: { id: { in: ids }, userId } });
+  return ids.length;
 }
 
 /** A short-lived signed download URL for a completed job's DOCX. */
@@ -514,10 +578,23 @@ export async function startFormattingFromChat(
   input: unknown,
   deps: Pick<FormattingDeps, "getProvider" | "getStorage"> = defaultDeps,
 ): Promise<{ job: FormattingJobView; created: boolean }> {
+  return (await startFormattingsFromChat(userId, conversationId, input, deps))[0]!;
+}
+
+/**
+ * Like `startFormattingFromChat`, for a message that names several templates
+ * ("format for Ceridian and Meridian"): one job per template, in the order named.
+ */
+export async function startFormattingsFromChat(
+  userId: string,
+  conversationId: unknown,
+  input: unknown,
+  deps: Pick<FormattingDeps, "getProvider" | "getStorage"> = defaultDeps,
+): Promise<{ job: FormattingJobView; created: boolean }[]> {
   const conversationIdResult = conversationIdSchema.safeParse(conversationId);
   if (!conversationIdResult.success) throw new NotFoundError("Conversation not found.");
   const id = conversationIdResult.data;
-  const { resumeFileId, templateId, text, previousReply } = parseOrThrow(
+  const { resumeFileId, templateId, text, previousReply, templateNames } = parseOrThrow(
     startChatFormattingSchema,
     input,
   );
@@ -563,18 +640,38 @@ export async function startFormattingFromChat(
 
   // Template: explicit → named in the message → named in the reply it answers
   // ("Want me to use Zillow?" → "yes") → selected for this chat.
-  let chosenTemplateId = templateId ?? null;
-  if (!chosenTemplateId && (text || previousReply)) {
+  let chosenTemplateIds: string[] = templateId ? [templateId] : [];
+  if (chosenTemplateIds.length === 0 && templateNames?.length) {
+    // Names the intent reader already matched: exact, but case-insensitive.
+    const templates = await db.clientTemplate.findMany({
+      where: { userId },
+      select: { id: true, name: true },
+      take: 500,
+    });
+    for (const name of templateNames) {
+      const found = templates.find(
+        (template) => template.name.trim().toLowerCase() === name.trim().toLowerCase(),
+      );
+      if (!found) {
+        throw chatProblem(
+          "templateId",
+          `There's no client template called "${name}". Your templates: ${templates.map((template) => template.name).join(", ")}.`,
+        );
+      }
+      if (!chosenTemplateIds.includes(found.id)) chosenTemplateIds.push(found.id);
+    }
+  }
+  if (chosenTemplateIds.length === 0 && (text || previousReply)) {
     const templates = await db.clientTemplate.findMany({
       where: { userId },
       select: { id: true, name: true },
       take: 500,
     });
     const names = templates.map((template) => template.name);
-    const inText = text ? matchTemplateName(text, names) : null;
+    const inText = text ? matchTemplateNames(text, names) : [];
     // "Format as per Abbott" with no Abbott template: say so rather than
     // quietly using another template.
-    const asked = text && !inText ? requestedTemplateName(text) : null;
+    const asked = text && inText.length === 0 ? requestedTemplateName(text) : null;
     if (asked) {
       throw chatProblem(
         "templateId",
@@ -583,23 +680,57 @@ export async function startFormattingFromChat(
           : `There's no client template called "${asked}" — you don't have any client templates yet. Add one on the Templates page first.`,
       );
     }
-    const named = inText ?? (previousReply ? matchTemplateName(previousReply, names) : null);
-    chosenTemplateId = templates.find((template) => template.name === named)?.id ?? null;
+    // The template of the reply being answered counts only for a bare "yes" /
+    // "ok do it" (or no text): a message that names something else must never
+    // fall back to an older template.
+    const answersOffer = !text || isAffirmative(text);
+    const named =
+      inText.length > 0
+        ? inText
+        : answersOffer && previousReply
+          ? [matchTemplateName(previousReply, names)].filter((name): name is string => !!name)
+          : [];
+    chosenTemplateIds = named
+      .map((name) => templates.find((template) => template.name === name)?.id)
+      .filter((value): value is string => !!value);
+    // A message that names something we could not match is not guessed.
+    if (chosenTemplateIds.length === 0 && text && !answersOffer && names.length > 0) {
+      const tried = (text.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []).filter(
+        (word) =>
+          !/^(?:format|formats|formatted|formatting|resume|resumes|template|templates|please|also|again|this|that|with|using|them|into|like)$/.test(
+            word,
+          ),
+      );
+      if (tried.length > 0) {
+        throw chatProblem(
+          "templateId",
+          `I couldn't tell which client template you mean. Your templates: ${names.join(", ")}. Name one of these.`,
+        );
+      }
+    }
   }
-  chosenTemplateId ??= conversation.clientTemplateId;
-  if (!chosenTemplateId) {
+  if (chosenTemplateIds.length === 0 && conversation.clientTemplateId) {
+    chosenTemplateIds = [conversation.clientTemplateId];
+  }
+  if (chosenTemplateIds.length === 0) {
     throw chatProblem(
       "templateId",
       'Which client template should I use? Name it in your message, e.g. "Format my resume using Client A", or select one with ⋮ → Client template.',
     );
   }
 
-  return createFormattingJob(
-    userId,
-    { resumeFileId: attachment.uploadedFileId, templateId: chosenTemplateId },
-    deps,
-    { conversationId: id, allowPendingResume: true },
-  );
+  const started: { job: FormattingJobView; created: boolean }[] = [];
+  for (const chosen of chosenTemplateIds) {
+    started.push(
+      await createFormattingJob(
+        userId,
+        { resumeFileId: attachment.uploadedFileId, templateId: chosen },
+        deps,
+        { conversationId: id, allowPendingResume: true },
+      ),
+    );
+  }
+  return started;
 }
 
 // --- processing ------------------------------------------------------------------

@@ -111,11 +111,37 @@ describe("buildResumeTaskMessages", () => {
     const system = messages[0]!.content;
     expect(system).toMatch(/right here in the chat/);
     expect(system).toMatch(/The app itself — not you — starts it/);
-    expect(system).toMatch(/STARTED: confirm in one sentence/);
+    expect(system).toMatch(/STARTED: the app has already started it/);
     expect(system).toContain("Built dashboards");
     expect(system).toContain('Available client templates: "Client A", "Client B"');
     expect(system).toContain('Selected client template for this conversation: "Client A"');
     expect(system).toContain("used when the user asks to format in this chat");
+  });
+
+  it("gives the model a warm voice: reassure after a slip, take thanks simply, use the first name sparingly", () => {
+    const messages = buildResumeTaskMessages(
+      {
+        instruction: "sorry my mistake",
+        history: [],
+        resumes: [],
+        availableTemplates: [],
+        userFirstName: "Rohit",
+      },
+      "markdown",
+    );
+    const system = messages[0]!.content;
+    expect(system).toMatch(/Voice and emotional intelligence/);
+    expect(system).toMatch(/They apologise or mention a typo, mix-up or mistake/);
+    expect(system).toMatch(/No worries — happens to everyone/);
+    expect(system).toMatch(/They thank you or praise the result/);
+    expect(system).toMatch(/Never open two replies the same way/);
+    expect(system).toContain('The user\'s first name: "Rohit"');
+    // No name known: nothing about a name.
+    const anonymous = buildResumeTaskMessages(
+      { instruction: "hi", history: [], resumes: [], availableTemplates: [] },
+      "markdown",
+    )[0]!.content;
+    expect(anonymous).not.toContain("The user's first name:");
   });
 
   it("tells the model how to converse: no pitches, no repetition, honest rewrites", () => {

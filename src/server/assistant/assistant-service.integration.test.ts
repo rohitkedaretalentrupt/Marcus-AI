@@ -470,12 +470,15 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
     } as unknown as FormattingJobView;
 
     function withFormatting(
-      outcome: { status: "started"; job: typeof job } | { status: "not_started"; reason: string },
+      outcome:
+        | { status: "started"; job: typeof job; jobs: (typeof job)[] }
+        | { status: "not_started"; reason: string },
+      provider: AIProvider = ok,
     ) {
       const startFormatting = vi.fn(async () => outcome);
       return {
         startFormatting,
-        deps: { getProvider: () => ok, extractionWaitMs: 0, startFormatting },
+        deps: { getProvider: () => provider, extractionWaitMs: 0, startFormatting },
       };
     }
 
@@ -494,11 +497,22 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
       return events;
     }
 
-    it("starts the job and announces it: no model call, no reply text", async () => {
+    it("starts the job and announces it; when the model says there is nothing to add, no text is shown or saved", async () => {
       const { conversation } = await chat.createConversation(alice, {
         message: "Format my resume using Zillow",
       });
-      const { startFormatting, deps: d } = withFormatting({ status: "started", job });
+      // The model decides: a plain instruction gets only the marker, split across chunks.
+      const quiet = createFakeAIProvider({
+        streamResumeTask: async function* (input) {
+          calls.push(input);
+          yield "[NO_";
+          yield "REPLY]";
+        },
+      });
+      const { startFormatting, deps: d } = withFormatting(
+        { status: "started", job, jobs: [job] },
+        quiet,
+      );
       const events = await eventsOf(conversation.id, d);
 
       expect(startFormatting).toHaveBeenCalledWith(
@@ -506,11 +520,27 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
         conversation.id,
         "Format my resume using Zillow",
         null,
+        undefined,
       );
-      // The progress card is the whole answer: nothing is written or saved.
+      // The progress card is the whole answer: the marker is never shown, nothing is saved.
       expect(events).toMatchObject([{ type: "formatting" }, { type: "done", message: null }]);
-      expect(calls).toHaveLength(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.formatting).toMatchObject({ status: "started", templateName: "Zillow" });
       expect(await assistantCount(conversation.id)).toBe(0);
+    });
+
+    it("when the model has something to say after a formatting start, it streams and is saved, with the first name in its context", async () => {
+      await db.user.update({ where: { id: alice }, data: { name: "Alice Example" } });
+      const { conversation } = await chat.createConversation(alice, {
+        message: "sorry my mistake, format it using Zillow",
+      });
+      const { deps: d } = withFormatting({ status: "started", job, jobs: [job] });
+      const events = await eventsOf(conversation.id, d);
+
+      expect(events.map((event) => event.type)).toEqual(["formatting", "delta", "delta", "done"]);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.userFirstName).toBe("Alice");
+      expect(await assistantCount(conversation.id)).toBe(1);
     });
 
     it("a 'yes' to a reply that offered formatting counts, with that reply as context", async () => {
@@ -534,9 +564,9 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
           createdAt: new Date(Date.now() + 2000),
         },
       });
-      const { startFormatting, deps: d } = withFormatting({ status: "started", job });
+      const { startFormatting, deps: d } = withFormatting({ status: "started", job, jobs: [job] });
       await eventsOf(conversation.id, d);
-      expect(startFormatting).toHaveBeenCalledWith(alice, conversation.id, "yes", offer);
+      expect(startFormatting).toHaveBeenCalledWith(alice, conversation.id, "yes", offer, undefined);
     });
 
     it("when formatting cannot start, the model gets the reason and no card is announced", async () => {
@@ -550,11 +580,177 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
       expect(calls[0]!.formatting).toEqual({ status: "not_started", reason });
     });
 
+    describe("the model reads the intent (any wording, any language)", () => {
+      beforeEach(async () => {
+        await db.clientTemplate.deleteMany({ where: { userId: alice } });
+      });
+
+      /** A READY client template named `name` for `alice`. */
+      async function readyTemplate(name: string) {
+        const id = `t${Date.now().toString(16)}${(counter++).toString(16).padStart(6, "0")}`;
+        const file = await db.uploadedFile.create({
+          data: {
+            id,
+            userId: alice,
+            originalFilename: "t.docx",
+            storageKey: `users/${alice}/uploads/${id}.docx`,
+            mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            sizeBytes: 10,
+            status: "READY",
+            purpose: "TEMPLATE",
+          },
+        });
+        await db.clientTemplate.create({
+          data: {
+            userId: alice,
+            uploadedFileId: file.id,
+            name,
+            nameKey: name.toLowerCase(),
+            status: "READY",
+          },
+        });
+      }
+
+      function providerReading(intent: {
+        format: boolean;
+        templates: string[];
+        unmatched: string[];
+      }) {
+        const seen: unknown[] = [];
+        const provider = createFakeAIProvider({
+          modelName: "fake",
+          classifyChatIntent: async (input) => {
+            seen.push(input);
+            return intent;
+          },
+          streamResumeTask: async function* (input) {
+            calls.push(input);
+            yield "[NO_REPLY]";
+          },
+        });
+        return { provider, seen };
+      }
+
+      async function chatWithResume(message: string) {
+        const fileId = await resumeFile(alice);
+        const { conversation } = await chat.createConversation(alice, {
+          message,
+          attachmentFileIds: [fileId],
+        });
+        return conversation.id;
+      }
+
+      it("starts the templates the model names, even in wording no rule knows", async () => {
+        await readyTemplate("BNP");
+        await readyTemplate("Bayer");
+        const conversationId = await chatWithResume("Galti ho gayi yr , bnp ke liye karo");
+        const { provider, seen } = providerReading({
+          format: true,
+          templates: ["BNP"],
+          unmatched: [],
+        });
+        const { startFormatting, deps: d } = withFormatting(
+          { status: "started", job, jobs: [job] },
+          provider,
+        );
+
+        const events = await eventsOf(conversationId, d);
+        expect(startFormatting).toHaveBeenCalledWith(
+          alice,
+          conversationId,
+          "Galti ho gayi yr , bnp ke liye karo",
+          null,
+          ["BNP"],
+        );
+        expect(seen[0]).toMatchObject({
+          instruction: "Galti ho gayi yr , bnp ke liye karo",
+          availableTemplates: expect.arrayContaining(["Bayer", "BNP"]),
+          hasResume: true,
+        });
+        expect(events[0]).toMatchObject({ type: "formatting" });
+      });
+
+      it("starts only the template the message names, even if the model also returns ones from older turns", async () => {
+        await readyTemplate("BNP");
+        await readyTemplate("Bayer");
+        await readyTemplate("Cigna");
+        const conversationId = await chatWithResume("Galti ho gayi yr , bnp ke liye karo");
+        const { provider } = providerReading({
+          format: true,
+          templates: ["Bayer", "BNP", "Cigna"],
+          unmatched: [],
+        });
+        const { startFormatting, deps: d } = withFormatting(
+          { status: "started", job, jobs: [job] },
+          provider,
+        );
+        await eventsOf(conversationId, d);
+        expect(startFormatting).toHaveBeenCalledWith(
+          alice,
+          conversationId,
+          "Galti ho gayi yr , bnp ke liye karo",
+          null,
+          ["BNP"],
+        );
+      });
+
+      it("does not format when the model says the message is not a request", async () => {
+        await readyTemplate("BNP");
+        const conversationId = await chatWithResume("format for bnp was great, thanks!");
+        const { provider } = providerReading({ format: false, templates: [], unmatched: [] });
+        const { startFormatting, deps: d } = withFormatting(
+          { status: "started", job, jobs: [job] },
+          provider,
+        );
+        const events = await eventsOf(conversationId, d);
+        expect(startFormatting).not.toHaveBeenCalled();
+        expect(events.map((event) => event.type)).not.toContain("formatting");
+        expect(calls.at(-1)!.formatting).toBeUndefined();
+      });
+
+      it("does not guess when the person names something that matches no template", async () => {
+        await readyTemplate("BNP");
+        const conversationId = await chatWithResume("do it for bjs");
+        const { provider } = providerReading({ format: true, templates: [], unmatched: ["bjs"] });
+        const { startFormatting, deps: d } = withFormatting(
+          { status: "started", job, jobs: [job] },
+          provider,
+        );
+        await eventsOf(conversationId, d);
+        expect(startFormatting).not.toHaveBeenCalled();
+        expect(calls.at(-1)!.formatting).toMatchObject({
+          status: "not_started",
+          reason: expect.stringContaining('"bjs"'),
+        });
+      });
+
+      it("falls back to the wording rules when the intent step fails", async () => {
+        await readyTemplate("Zillow");
+        const conversationId = await chatWithResume("Format my resume using Zillow");
+        const broken = createFakeAIProvider({
+          modelName: "fake",
+          classifyChatIntent: async () => {
+            throw new Error("down");
+          },
+          streamResumeTask: async function* (input) {
+            calls.push(input);
+            yield "[NO_REPLY]";
+          },
+        });
+        const { startFormatting, deps: d } = withFormatting(
+          { status: "started", job, jobs: [job] },
+          broken,
+        );
+        await eventsOf(conversationId, d);
+        expect(startFormatting).toHaveBeenCalled();
+      });
+    });
+
     it("ordinary messages never start formatting", async () => {
       const { conversation } = await chat.createConversation(alice, {
         message: "what's your name?",
       });
-      const { startFormatting, deps: d } = withFormatting({ status: "started", job });
+      const { startFormatting, deps: d } = withFormatting({ status: "started", job, jobs: [job] });
       await eventsOf(conversation.id, d);
       expect(startFormatting).not.toHaveBeenCalled();
       expect(calls[0]!.formatting).toBeUndefined();
