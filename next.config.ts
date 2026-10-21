@@ -46,6 +46,9 @@ const nextConfig: NextConfig = {
   // Left off locally so `npm start` works as usual.
   output: process.env.NEXT_OUTPUT === "standalone" ? "standalone" : undefined,
   poweredByHeader: false,
+  // Dev server only: let teammates on the same Wi-Fi/LAN open the app by IP
+  // (http://192.168.x.x:3000). Ignored in production builds.
+  allowedDevOrigins: ["192.168.*.*", "10.*.*.*"],
   // Document parsers run only on the server; load them from node_modules
   // instead of bundling (pdf.js workers / dynamic requires).
   serverExternalPackages: ["unpdf", "mammoth"],

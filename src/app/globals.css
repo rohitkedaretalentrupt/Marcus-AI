@@ -437,12 +437,44 @@
   padding: 12px 8px;
   align-items: center;
 }
+/*
+ * docx-preview draws every section of the file (a switch to two columns,
+ * for instance) as its own page-sized box with margins and a gap. Word shows
+ * those sections flowing on one page, so the boxes are joined into one sheet:
+ * no minimum height, no gap, and page margins only at the very top and bottom.
+ */
 .resume-preview .docx-wrapper > section.docx {
-  margin-bottom: 12px;
+  min-height: 0 !important;
+  margin-bottom: 0;
   box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+}
+.resume-preview .docx-wrapper > section.docx:not(:first-child) {
+  padding-top: 0 !important;
+  box-shadow: none;
+}
+.resume-preview .docx-wrapper > section.docx:not(:last-child) {
+  padding-bottom: 0 !important;
 }
 /* Dark theme: the white page is shown dark, colours keep their hue. */
 .dark .resume-preview .docx-wrapper > section.docx {
   filter: invert(1) hue-rotate(180deg);
+  /* Outline the joined sheet: sides on every box, top/bottom only at its ends. */
+  box-shadow:
+    1px 0 0 0 var(--border),
+    -1px 0 0 0 var(--border);
+}
+.dark .resume-preview .docx-wrapper > section.docx:first-child {
+  box-shadow:
+    1px 0 0 0 var(--border),
+    -1px 0 0 0 var(--border),
+    0 -1px 0 0 var(--border);
+}
+.dark .resume-preview .docx-wrapper > section.docx:last-child {
+  box-shadow:
+    1px 0 0 0 var(--border),
+    -1px 0 0 0 var(--border),
+    0 1px 0 0 var(--border);
+}
+.dark .resume-preview .docx-wrapper > section.docx:only-child {
   box-shadow: 0 0 0 1px var(--border);
 }
