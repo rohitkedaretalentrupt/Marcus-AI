@@ -32,7 +32,8 @@ export function isGenerating(state: ReplyState): boolean {
  */
 export function useAssistantReply(
   conversationId: string,
-  onReply: (message: ChatMessage) => void,
+  /** `null`: formatting started, and its progress card is the whole answer. */
+  onReply: (message: ChatMessage | null) => void,
   onFormatting?: (job: FormattingJobView) => void,
 ) {
   const [state, setState] = useState<ReplyState>({ status: "idle", id: 0 });

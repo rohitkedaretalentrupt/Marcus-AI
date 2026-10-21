@@ -438,7 +438,7 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
     it("Regenerate replaces the reply: never two answers to one message", async () => {
       const { conversation } = await chat.createConversation(alice, { message: "Hi" });
       const first = await assistant.generateAssistantReply(alice, conversation.id, deps(ok));
-      await chat.prepareRetry(alice, conversation.id, first.id);
+      await chat.prepareRetry(alice, conversation.id, first!.id);
       const again = fakeProvider(async () => ({ reply: "A better answer." }));
       await assistant.generateAssistantReply(alice, conversation.id, deps(again));
 
@@ -494,7 +494,7 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
       return events;
     }
 
-    it("starts the job before the reply, announces it first and tells the model", async () => {
+    it("starts the job and announces it: no model call, no reply text", async () => {
       const { conversation } = await chat.createConversation(alice, {
         message: "Format my resume using Zillow",
       });
@@ -507,12 +507,10 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
         "Format my resume using Zillow",
         null,
       );
-      expect(events.map((event) => event.type)).toEqual(["formatting", "delta", "delta", "done"]);
-      expect(calls[0]!.formatting).toEqual({
-        status: "started",
-        templateName: "Zillow",
-        resumeFilename: "cv.pdf",
-      });
+      // The progress card is the whole answer: nothing is written or saved.
+      expect(events).toMatchObject([{ type: "formatting" }, { type: "done", message: null }]);
+      expect(calls).toHaveLength(0);
+      expect(await assistantCount(conversation.id)).toBe(0);
     });
 
     it("a 'yes' to a reply that offered formatting counts, with that reply as context", async () => {

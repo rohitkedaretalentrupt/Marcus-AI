@@ -123,6 +123,24 @@ describe("parseResumeText", () => {
     ]);
   });
 
+  it("keeps a sentence under a skills heading whole instead of cutting it at commas", () => {
+    const text = `Pat Example
+pat@example.test
+
+Skills
+Roadmapping, Stakeholder Management
+Led post-merger consolidation across Canada, the U.S., and Mexico.
+Built a repeatable release framework with readiness gates, SIT/UAT, and cutover planning.
+`;
+    const skills = parseResumeText(text).content.sections.find((s) => s.title === "Skills")!;
+    expect(skills.entries[0]!.bullets).toEqual([
+      "Roadmapping",
+      "Stakeholder Management",
+      "Led post-merger consolidation across Canada, the U.S., and Mexico.",
+      "Built a repeatable release framework with readiness gates, SIT/UAT, and cutover planning.",
+    ]);
+  });
+
   it("recognises ALL-CAPS headings and unknown custom sections", () => {
     const { content } = parseResumeText(`
 JOHN SMITH

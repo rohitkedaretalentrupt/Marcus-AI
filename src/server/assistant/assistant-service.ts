@@ -196,7 +196,7 @@ const replyFailed = () =>
 export type AssistantReplyEvent =
   | { type: "formatting"; job: FormattingJobView }
   | { type: "delta"; text: string }
-  | { type: "done"; message: ChatMessage }
+  | { type: "done"; message: ChatMessage | null }
   | { type: "error"; error: AppError };
 
 export interface AssistantReplyStream {
@@ -316,7 +316,12 @@ export async function startAssistantReply(
 
   async function* run(): AsyncGenerator<AssistantReplyEvent, void, undefined> {
     try {
-      if (formattingJob) yield { type: "formatting", job: formattingJob };
+      if (formattingJob) {
+        yield { type: "formatting", job: formattingJob };
+        // The progress card is the answer: no text is written or saved.
+        yield { type: "done", message: null };
+        return;
+      }
       let text = "";
       try {
         for await (const chunk of provider.streamResumeTask(input, { signal })) {
@@ -366,7 +371,7 @@ export async function generateAssistantReply(
   userId: string,
   conversationId: unknown,
   deps: AssistantDeps = defaultDeps,
-): Promise<ChatMessage> {
+): Promise<ChatMessage | null> {
   const reply = await startAssistantReply(
     userId,
     conversationId,

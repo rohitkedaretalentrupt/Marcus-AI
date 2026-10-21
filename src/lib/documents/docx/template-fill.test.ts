@@ -587,6 +587,258 @@ describe("DOCX template fill engine", () => {
     expect(breaks[1]).toContain('w:num="2"');
   });
 
+  it("shows each job once when the plan's repeat group spans several sample jobs", async () => {
+    const { Document, Packer, Paragraph, TextRun, LevelFormat, AlignmentType } =
+      await import("docx");
+    const bold = (text: string) => new Paragraph({ children: [new TextRun({ text, bold: true })] });
+    const bullet = (text: string) =>
+      new Paragraph({ numbering: { reference: "dots", level: 0 }, text });
+    const template = new Uint8Array(
+      await Packer.toBuffer(
+        new Document({
+          numbering: {
+            config: [
+              {
+                reference: "dots",
+                levels: [
+                  {
+                    level: 0,
+                    format: LevelFormat.BULLET,
+                    text: "•",
+                    alignment: AlignmentType.LEFT,
+                  },
+                ],
+              },
+            ],
+          },
+          sections: [
+            {
+              children: [
+                bold("Pat Example-Sample"),
+                bold("Experience:"),
+                bold("First Sample Corp"),
+                bold("First Sample Role"),
+                bullet("First sample duty"),
+                bullet("Second sample duty"),
+                new Paragraph(""),
+                bold("Second Sample Corp"),
+                bold("Second Sample Role"),
+                bullet("Third sample duty"),
+                new Paragraph(""),
+                bold("Third Sample Corp"),
+                bold("Third Sample Role"),
+                bullet("Fourth sample duty"),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    const blocks = await readTemplateBlocks(template);
+    const { paragraph } = ids(blocks);
+    const blanks = blocks.filter((b) => b.kind === "paragraph" && b.empty).map((b) => b.id);
+    // The plan spans all three sample jobs and fills each with explicit entry references.
+    const raw = aiFillPlanSchema.parse({
+      version: 1,
+      fills: [
+        { block: paragraph("Pat Example"), refs: ["contact.fullName"] },
+        { block: paragraph("First Sample Corp"), refs: ["s0.e0.subheading"] },
+        { block: paragraph("First Sample Role"), refs: ["s0.e0.heading"] },
+        { block: paragraph("First sample duty"), refs: ["s0.e0.description"] },
+        { block: paragraph("Second Sample Corp"), refs: ["s0.e1.subheading"] },
+        { block: paragraph("Second Sample Role"), refs: ["s0.e1.heading"] },
+        { block: paragraph("Third sample duty"), refs: ["s0.e1.description"] },
+      ],
+      clears: [paragraph("Second sample duty"), paragraph("Third Sample"), paragraph("Fourth")],
+      groups: [
+        {
+          source: "s0",
+          per: "entry",
+          blocks: [
+            paragraph("First Sample Corp"),
+            paragraph("First Sample Role"),
+            paragraph("First sample duty"),
+            paragraph("Second sample duty"),
+            blanks[0]!,
+            paragraph("Second Sample Corp"),
+            paragraph("Second Sample Role"),
+            paragraph("Third sample duty"),
+          ],
+        },
+      ],
+    });
+    const { plan } = finalizeFillPlan(raw, RESUME, blocks, source);
+    const shown = contentShownByFillPlan(RESUME, plan);
+    const filled = await fillDocxTemplate(template, plan, shown);
+    const text = await textOf(filled.data);
+    // Each real job appears exactly once, with a blank line between them.
+    expect(text.match(/Example Bakeries/g)).toHaveLength(1);
+    expect(text.match(/Example Logistics/g)).toHaveLength(1);
+    expect(text).toMatch(/Logged load weights[^\n]*\n\nExample Logistics/);
+    expect(text).not.toMatch(/Sample/);
+    expect(
+      await validateDocx(filled.data, shown, {
+        mode: "filled",
+        forbiddenTexts: filled.forbiddenTexts,
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("flags content that appears more often than the resume has it", async () => {
+    const { Document, Packer, Paragraph } = await import("docx");
+    const bytes = new Uint8Array(
+      await Packer.toBuffer(
+        new Document({
+          sections: [
+            {
+              children: [
+                new Paragraph("Riley Synthetic"),
+                new Paragraph("Picked and packed orders for the warehouse team."),
+                new Paragraph("Picked and packed orders for the warehouse team."),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    const content: ResumeContent = {
+      ...RESUME,
+      summary: undefined,
+      sections: [
+        {
+          kind: "experience",
+          title: "Experience",
+          entries: [
+            { heading: "Picker", bullets: ["Picked and packed orders for the warehouse team."] },
+          ],
+        },
+      ],
+    };
+    const result = await validateDocx(bytes, content, { mode: "filled" });
+    expect(result.problems.join(" ")).toMatch(/more than once/);
+  });
+
+  it("keeps the blank line between entries and puts dates at the right margin", async () => {
+    const { Document, Packer, Paragraph, TextRun, Tab, LevelFormat, AlignmentType } =
+      await import("docx");
+    const bold = (text: string) => new Paragraph({ children: [new TextRun({ text, bold: true })] });
+    const template = new Uint8Array(
+      await Packer.toBuffer(
+        new Document({
+          numbering: {
+            config: [
+              {
+                reference: "dots",
+                levels: [
+                  {
+                    level: 0,
+                    format: LevelFormat.BULLET,
+                    text: "•",
+                    alignment: AlignmentType.LEFT,
+                  },
+                ],
+              },
+            ],
+          },
+          sections: [
+            {
+              children: [
+                bold("Pat Example-Sample"),
+                bold("Experience:"),
+                // The date is lined up with a run of tabs, as many templates do.
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: "Sample Corp", bold: true }),
+                    new TextRun({
+                      children: [new Tab(), new Tab(), new Tab(), new Tab(), "2019 – 2021"],
+                    }),
+                  ],
+                }),
+                bold("Sample Engineer"),
+                new Paragraph({
+                  numbering: { reference: "dots", level: 0 },
+                  text: "Built sample things",
+                }),
+                new Paragraph(""),
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: "Other Sample Inc", bold: true }),
+                    new TextRun({ children: [new Tab(), new Tab(), "2015 – 2017"] }),
+                  ],
+                }),
+                bold("Sample Manager"),
+                new Paragraph({
+                  numbering: { reference: "dots", level: 0 },
+                  text: "Managed sample teams",
+                }),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    const blocks = await readTemplateBlocks(template);
+    const { paragraph } = ids(blocks);
+    const blank = blocks.find((b) => b.kind === "paragraph" && b.empty)!;
+    const raw = aiFillPlanSchema.parse({
+      version: 1,
+      fills: [
+        { block: paragraph("Pat Example"), refs: ["contact.fullName"] },
+        { block: paragraph("Sample Corp"), refs: ["entry.subheading", "entry.dates"] },
+        { block: paragraph("Sample Engineer"), refs: ["entry.heading"] },
+        { block: paragraph("Built sample"), refs: ["entry.text"] },
+      ],
+      // The plan clears the blank separator with the sample entry.
+      clears: [
+        blank.id,
+        paragraph("Other Sample"),
+        paragraph("Sample Manager"),
+        paragraph("Managed sample"),
+      ],
+      groups: [
+        {
+          source: "s0",
+          per: "entry",
+          blocks: [
+            paragraph("Sample Corp"),
+            paragraph("Sample Engineer"),
+            paragraph("Built sample"),
+            blank.id,
+          ],
+        },
+      ],
+    });
+    const { plan } = finalizeFillPlan(raw, RESUME, blocks, source);
+    const filled = await fillDocxTemplate(template, plan, contentShownByFillPlan(RESUME, plan));
+    const xml = await (
+      await JSZip.loadAsync(filled.data)
+    )
+      .file("word/document.xml")!
+      .async("string");
+    const lines = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map((m) => m[0]);
+    const textOf = (p: string) => [...p.matchAll(/<w:t[^>]*>([^<]*)/g)].map((a) => a[1]).join("");
+    const at = lines.findIndex((p) => textOf(p).startsWith("Example Logistics"));
+    // A blank line separates the two jobs.
+    expect(textOf(lines[at - 1]!)).toBe("");
+    expect(textOf(lines[at - 2]!)).toContain("Logged load weights");
+    // One tab and a right-aligned stop at the text width (A4 default: 9026 twips).
+    for (const p of lines.filter((q) => /Example (Bakeries|Logistics)/.test(textOf(q)))) {
+      expect(p.match(/<w:tab\/>/g)).toHaveLength(1);
+      expect(p).toMatch(/<w:tabs><w:tab w:val="right" w:pos="\d{4,5}"\/><\/w:tabs>/);
+    }
+  });
+
+  it("lists details the plan left out under Additional Information when asked to", async () => {
+    const blocks = await readTemplateBlocks(await makeFormTemplateDocx());
+    const raw = goodPlan(blocks);
+    const template = await makeFormTemplateDocx();
+    const { plan } = finalizeFillPlan(raw, RESUME, blocks, source);
+    const shown = contentShownByFillPlan(RESUME, plan);
+    const filled = await fillDocxTemplate(template, plan, shown, ["A detail with no place"]);
+    const text = await textOf(filled.data);
+    expect(text).toMatch(/Additional Information\n(?:[^\n]*\n)*•? ?A detail with no place/);
+  });
+
   it("shows a single date column as the whole date range", async () => {
     const blocks = await readTemplateBlocks(await makeFormTemplateDocx());
     const raw = goodPlan(blocks);

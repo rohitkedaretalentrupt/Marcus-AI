@@ -21,6 +21,8 @@ export interface DocxValidationResult {
   ok: boolean;
   /** Internal descriptions (no resume text): e.g. "missing part word/document.xml", "missing 3 text items". */
   problems: string[];
+  /** Resume texts the document lacks (filled and generated documents). */
+  missingTexts?: string[];
 }
 
 const decodeXml = (text: string) =>
@@ -45,7 +47,8 @@ export function documentXmlText(xml: string): string {
 }
 
 /** Every text item from the resume that must appear in the document. */
-export function expectedTexts(content: ResumeContent): string[] {
+/** Every text of the resume (comparable form), repeats included. */
+function resumeTexts(content: ResumeContent): string[] {
   const { contact } = content;
   const texts = [
     contact.fullName,
@@ -61,14 +64,29 @@ export function expectedTexts(content: ResumeContent): string[] {
       texts.push(...toParagraphs(entry.description), ...entry.bullets);
     }
   }
-  return [
-    ...new Set(
-      texts
-        .filter((text): text is string => typeof text === "string")
-        .map(comparable)
-        .filter(Boolean),
-    ),
-  ];
+  return texts
+    .filter((text): text is string => typeof text === "string")
+    .map(comparable)
+    .filter(Boolean);
+}
+
+export function expectedTexts(content: ResumeContent): string[] {
+  return [...new Set(resumeTexts(content))];
+}
+
+/** Longer texts (bullets, paragraphs) shown more often than the resume has them. */
+const MIN_DUPLICATE_CHARS = 30;
+function repeatedTexts(text: string, content: ResumeContent): number {
+  const all = resumeTexts(content);
+  // How often a text occurs in the resume itself (also inside longer texts).
+  const joined = all.join("\n");
+  let repeated = 0;
+  for (const expected of new Set(all)) {
+    if (expected.length < MIN_DUPLICATE_CHARS) continue;
+    const inResume = joined.split(expected).length - 1;
+    if (text.split(expected).length - 1 > inResume) repeated++;
+  }
+  return repeated;
 }
 
 export interface DocxValidationOptions {
@@ -122,6 +140,10 @@ export async function validateDocx(
   const text = comparable(documentXmlText(xml));
   const missing = expectedTexts(content).filter((expected) => !text.includes(expected));
   if (missing.length) problems.push(`missing ${missing.length} text item(s)`);
+  if (filled) {
+    const repeated = repeatedTexts(text, content);
+    if (repeated) problems.push(`${repeated} text item(s) appear more than once`);
+  }
 
   // Nothing of the template's sample candidate may survive, in any part.
   if (options.forbiddenTexts?.length) {
@@ -155,7 +177,11 @@ export async function validateDocx(
   const styles = (await zip.file("word/styles.xml")?.async("string")) ?? "";
   problems.push(...structuralProblems(xml, rels, styles, { layout: !filled }));
 
-  return { ok: problems.length === 0, problems: [...new Set(problems)] };
+  return {
+    ok: problems.length === 0,
+    problems: [...new Set(problems)],
+    ...(missing.length ? { missingTexts: missing } : {}),
+  };
 }
 
 /** Smallest run size allowed anywhere (half-points): 8 pt, used only for footers. */

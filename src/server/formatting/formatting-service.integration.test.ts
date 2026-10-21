@@ -203,7 +203,7 @@ describe.skipIf(!TEST_DATABASE_URL)("resume formatting (PostgreSQL, mocked AI)",
 
     // Versioning metadata and the validated plan are stored; originals untouched.
     const stored_job = await db.formattingJob.findUniqueOrThrow({ where: { id: job.id } });
-    expect(stored_job).toMatchObject({ attempts: 1, activeKey: null, resumeParserVersion: 2 });
+    expect(stored_job).toMatchObject({ attempts: 1, activeKey: null, resumeParserVersion: 4 });
     expect(stored_job.templateAnalyzedAt).toBeInstanceOf(Date);
     expect(stored_job.plan).toMatchObject({
       source: { resumeFileId: resume.fileId, templateId: template.templateId, engineVersion: 3 },

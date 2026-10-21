@@ -58,6 +58,7 @@ import {
 import { parseOrThrow } from "@/lib/validation/zod-issues";
 import { Prisma } from "@/generated/prisma/client";
 import { logger } from "@/server/logger";
+import { refreshOutdatedExtraction } from "@/server/resumes/extraction-service";
 
 /*
  * Resume formatting jobs:
@@ -779,13 +780,15 @@ async function fillAndValidate(
     return { ok: false, reason: "empty fill plan" };
   }
   const shown = contentShownByFillPlan(content, planned.plan);
-  let filled: Awaited<ReturnType<typeof fillDocxTemplate>>;
-  try {
-    filled = await withTimeout(
-      fillDocxTemplate(templateBytes, planned.plan, shown),
+  const fillWith = (extraLines: readonly string[]) =>
+    withTimeout(
+      fillDocxTemplate(templateBytes, planned.plan, shown, extraLines),
       RENDER_TIMEOUT_MS,
       "Template filling",
     );
+  let filled: Awaited<ReturnType<typeof fillDocxTemplate>>;
+  try {
+    filled = await fillWith([]);
   } catch (error) {
     return { ok: false, reason: `fill failed: ${error instanceof Error ? error.name : "?"}` };
   }
@@ -794,17 +797,43 @@ async function fillAndValidate(
   const sampleTexts = sampleValues(samples)
     .map((sample) => comparable(sample))
     .filter((sample) => !resumeText.includes(sample.toLowerCase()));
-  const validation = await validateDocx(filled.data, shown, {
-    mode: "filled",
-    forbiddenTexts: [...filled.forbiddenTexts, ...sampleTexts],
-  });
+  const validate = (data: Uint8Array) =>
+    validateDocx(data, shown, {
+      mode: "filled",
+      // (Never text the candidate really has: the same school, the same name.)
+      forbiddenTexts: [
+        ...filled.forbiddenTexts.filter(
+          (text) => !resumeText.includes(comparable(text).toLowerCase()),
+        ),
+        ...sampleTexts,
+      ],
+    });
+  let validation = await validate(filled.data);
+  const warnings = [...planned.warnings, ...filled.warnings];
+  // Only some resume text missing (a detail the plan found no place for): it is
+  // listed under "Additional Information" rather than dropping the client's layout.
+  const onlyMissing =
+    !validation.ok &&
+    validation.problems.length === 1 &&
+    validation.problems[0]!.startsWith("missing") &&
+    (validation.missingTexts?.length ?? 0) > 0;
+  if (onlyMissing) {
+    try {
+      const rescued = await fillWith(validation.missingTexts!);
+      const again = await validate(rescued.data);
+      if (again.ok) {
+        filled = rescued;
+        validation = again;
+        warnings.push(
+          'Some details the template has no place for were added under "Additional Information" at the end.',
+        );
+      }
+    } catch {
+      // The first result stands (and fails): the generator takes over.
+    }
+  }
   if (!validation.ok) return { ok: false, reason: validation.problems.join("; ") };
-  return {
-    ok: true,
-    data: filled.data,
-    plan: planned.plan,
-    warnings: [...planned.warnings, ...filled.warnings],
-  };
+  return { ok: true, data: filled.data, plan: planned.plan, warnings };
 }
 
 /**
@@ -841,6 +870,10 @@ export async function runFormattingJob(
       select: { resumeFileId: true, clientTemplateId: true },
     });
     if (!job) return null;
+
+    // A resume read with an older parser is read again first (in place): parser
+    // fixes reach resumes that were uploaded before them.
+    if (job.resumeFileId) await refreshOutdatedExtraction(userId, job.resumeFileId);
 
     // A resume attached moments ago may still be being read: wait for it.
     if (job.resumeFileId) {

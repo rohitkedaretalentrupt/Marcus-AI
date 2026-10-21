@@ -8,6 +8,8 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/compone
 import { FormAlert } from "@/components/ui/form-alert";
 import { apiErrorFrom, ApiRequestError } from "@/lib/api/client";
 
+import { alignTabbedDates } from "../lib/align-tabbed-dates";
+
 const previewUrl = (jobId: string) => `/api/formatting-jobs/${encodeURIComponent(jobId)}/preview`;
 
 /**
@@ -49,6 +51,7 @@ function ResumePages({ jobId }: { jobId: string }) {
         useBase64URL: true,
       });
       if (controller.signal.aborted) return;
+      alignTabbedDates(container);
       fit();
       setState("ready");
     })().catch((error: unknown) => {

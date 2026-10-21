@@ -52,7 +52,7 @@ export async function streamReply(
     /** The message asked for formatting and the server started the job. */
     onFormatting?: (job: FormattingJobView) => void;
   },
-): Promise<ChatMessage> {
+): Promise<ChatMessage | null> {
   let response: Response;
   try {
     response = await fetch(`${conversationApi(conversationId)}/reply`, { method: "POST", signal });

@@ -215,7 +215,9 @@ const asText = (value: string | Link) => (typeof value === "string" ? value : va
  */
 function resolveRef(ref: string | null, content: ResumeContent, ctx: Context): (string | Link)[] {
   if (ref === null) return [];
-  const parts = withDateRanges(refParts(ref)).map((part) => resolvePart(part, content, ctx));
+  // The same reference written twice ("s2.e0.bullets+s2.e0.bullets") shows once.
+  const unique = [...new Set(refParts(ref))];
+  const parts = withDateRanges(unique).map((part) => resolvePart(part, content, ctx));
   if (parts.length === 1) return parts[0]!;
   const joined = parts.flatMap((values) => values.map(asText)).filter(Boolean);
   // Contact details on one line read "email | phone".
@@ -399,6 +401,8 @@ class Filler {
     private readonly plan: FillPlan,
     private readonly content: ResumeContent,
     private readonly body: TemplateBody,
+    /** Resume texts the filled document would otherwise lack: listed at the end. */
+    private readonly extraLines: readonly string[] = [],
   ) {
     for (const fill of plan.fills) this.fills.set(fill.block, fill);
     this.clears = new Set(plan.clears);
@@ -483,7 +487,11 @@ class Filler {
       index = this.fillNode(source, index, nodes);
       endSections(from, index);
     }
-    const body = { ...this.body, nodes: tidyBlankLines(nodes, source) };
+    const width = textWidthOf(this.body.sectPr);
+    const aligned = nodes.map((node) =>
+      node.kind === "paragraph" ? alignTabbedDates(node, width) : node,
+    );
+    const body = { ...this.body, nodes: tidyBlankLines(aligned, source) };
     this.appendAdditional(body);
     if (this.plan.insertName) {
       // In the template's heading font and size, bold, without list numbering.
@@ -564,6 +572,11 @@ class Filler {
     }
     const shown = groupFields(group, this.fills);
     const out: ParagraphNode[] = [];
+    const first = run.find((p) => paragraphText(p).trim().length > 0);
+    const separated =
+      run.length > 1 && isBlankLine(run.at(-1)!)
+        ? true
+        : first !== undefined && spaceBefore(first.pPr) >= MIN_ENTRY_SPACE_TWIPS;
     for (const ctx of this.repetitions(group)) {
       let firstFilled = -1;
       const clone: ParagraphNode[] = [];
@@ -589,6 +602,13 @@ class Filler {
           clone.splice(lastFilled + 1, 0, ...paragraphsFor(model, lines));
         }
         if (scalars.length || lines.length) this.noteLeftovers();
+      }
+      // A template that puts nothing between its sample entries (no blank
+      // line, no space above the first line) would run the real entries
+      // together: a small gap goes above every entry after the first.
+      if (out.length > 0 && !separated) {
+        const at = clone.findIndex((p) => paragraphText(p).trim().length > 0);
+        if (at >= 0) clone[at] = withSpaceBefore(clone[at]!, ENTRY_GAP_TWIPS);
       }
       out.push(...clone);
     }
@@ -707,7 +727,7 @@ class Filler {
 
   private appendAdditional(body: TemplateBody) {
     const items = this.additionalItems();
-    if (items.length === 0) return;
+    if (items.length === 0 && this.extraLines.length === 0) return;
     // Models never carry a section break (that would start a new section).
     const originals = this.body.nodes
       .filter((node): node is ParagraphNode => node.kind === "paragraph")
@@ -794,6 +814,8 @@ class Filler {
       previous = item.label;
       for (const line of item.lines) body.nodes.push(bullet(line));
     }
+    // Details the plan left out (found by the final check), one bullet each.
+    for (const line of this.extraLines) body.nodes.push(bullet(line));
   }
 }
 
@@ -821,10 +843,91 @@ function styledLike(paragraph: ParagraphNode, source: BodyNode[], index: number)
   return paragraph;
 }
 
+const ENTRY_GAP_TWIPS = 160; // 8 pt
+const MIN_ENTRY_SPACE_TWIPS = 80; // a template with at least 4 pt above its entries is left alone
+
+/** The space above a paragraph (twips) set directly on it; 0 when none. */
+function spaceBefore(pPr: string): number {
+  const spacing = /<w:spacing\b[^>]*\/>/.exec(pPr.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, ""))?.[0];
+  return Number(/\bw:before="(\d+)"/.exec(spacing ?? "")?.[1] ?? 0);
+}
+
+/** The paragraph with the given space above it (twips). */
+function withSpaceBefore(paragraph: ParagraphNode, twips: number): ParagraphNode {
+  const pPr = paragraph.pPr || "<w:pPr></w:pPr>";
+  const bare = pPr.replace(/<w:rPr>[\s\S]*?<\/w:rPr>/, "");
+  const existing = /<w:spacing\b[^>]*\/>/.exec(bare)?.[0];
+  if (existing) {
+    const next = /\bw:before="/.test(existing)
+      ? existing.replace(/\bw:before="\d+"/, `w:before="${twips}"`)
+      : existing.replace("<w:spacing", `<w:spacing w:before="${twips}"`);
+    return { ...paragraph, pPr: pPr.replace(existing, next) };
+  }
+  const spacing = `<w:spacing w:before="${twips}"/>`;
+  const at = pPr.search(PPR_AFTER_SPACING);
+  return {
+    ...paragraph,
+    pPr:
+      at === -1
+        ? pPr.replace("</w:pPr>", `${spacing}</w:pPr>`)
+        : `${pPr.slice(0, at)}${spacing}${pPr.slice(at)}`,
+  };
+}
+const PPR_AFTER_SPACING =
+  /<w:(?:ind|contextualSpacing|mirrorIndents|suppressOverlap|jc|textDirection|textAlignment|textboxTightWrap|outlineLvl|divId|cnfStyle|rPr|sectPr|pPrChange)\b/;
+
 const centered = (align: string | undefined) => align === "center" || align === "right";
 
 const withoutSectionBreakNode = (node: BodyNode): BodyNode =>
   node.kind === "paragraph" ? withoutSectionBreak(node) : node;
+
+const DATE_LIKE = /\b(?:19|20)\d{2}\b|\b(?:present|current|till date|to date)\b/i;
+const PPR_AFTER_TABS =
+  /<w:(?:suppressAutoHyphens|kinsoku|wordWrap|overflowPunct|topLinePunct|autoSpaceDE|autoSpaceDN|bidi|adjustRightInd|snapToGrid|spacing|ind|contextualSpacing|mirrorIndents|suppressOverlap|jc|textDirection|textAlignment|textboxTightWrap|outlineLvl|divId|cnfStyle|rPr|sectPr|pPrChange)\b/;
+
+/** Width of the text area (page width minus side margins), in twips. */
+function textWidthOf(sectPr: string): number | null {
+  const attr = (tag: string, name: string) =>
+    Number(new RegExp(`<w:${tag}\\b[^>]*\\bw:${name}="(\\d+)"`).exec(sectPr)?.[1]);
+  const page = attr("pgSz", "w");
+  const left = attr("pgMar", "left");
+  const right = attr("pgMar", "right");
+  const width = page - left - right - (attr("pgMar", "gutter") || 0);
+  return Number.isFinite(width) && width > 2000 ? width : null;
+}
+
+/**
+ * Templates line dates up with a run of tab characters ("Employer⇥⇥⇥⇥⇥ 2021").
+ * That only lands in the right place for the sample's employer name: a longer
+ * name uses up more tabs and the date moves away from the right edge. Such a
+ * line gets one tab and a right-aligned tab stop at the margin instead.
+ */
+function alignTabbedDates(paragraph: ParagraphNode, width: number | null): ParagraphNode {
+  if (!width || /<w:tab\s/.test(paragraph.pPr)) return paragraph;
+  const segments = paragraphSegments(paragraph);
+  if (segments.length < 2) return paragraph;
+  const last = segments.at(-1)!;
+  if (last.text.length > 40 || !DATE_LIKE.test(last.text)) return paragraph;
+  const from = segments.at(-2)!.to;
+  const tabs = paragraph.atoms.slice(from, last.from).filter((atom) => atom.kind === "tab");
+  if (tabs.length < 2) return paragraph;
+  const gap = paragraph.atoms.slice(from, last.from);
+  if (gap.some((atom) => atom.kind !== "tab" && !(atom.kind === "text" && !atom.text.trim())))
+    return paragraph;
+  const atoms = [...paragraph.atoms.slice(0, from), tabs[0]!, ...paragraph.atoms.slice(last.from)];
+  const stop = `<w:tabs><w:tab w:val="right" w:pos="${width}"/></w:tabs>`;
+  const pPr = !paragraph.pPr
+    ? `<w:pPr>${stop}</w:pPr>`
+    : paragraph.pPr === "<w:pPr/>"
+      ? `<w:pPr>${stop}</w:pPr>`
+      : (() => {
+          const at = paragraph.pPr.search(PPR_AFTER_TABS);
+          return at === -1
+            ? paragraph.pPr.replace("</w:pPr>", `${stop}</w:pPr>`)
+            : `${paragraph.pPr.slice(0, at)}${stop}${paragraph.pPr.slice(at)}`;
+        })();
+  return { ...paragraph, pPr, atoms };
+}
 
 /** A blank line: no text, nothing drawn, no section break. */
 function isBlankLine(node: BodyNode): boolean {
@@ -903,8 +1006,9 @@ export function fillTemplateBody(
   body: TemplateBody,
   plan: FillPlan,
   content: ResumeContent,
+  extraLines: readonly string[] = [],
 ): FilledBody {
-  const filler = new Filler(plan, content, body);
+  const filler = new Filler(plan, content, body, extraLines);
   const filled = filler.fill();
   return {
     body: filled,
@@ -964,6 +1068,7 @@ export async function fillDocxTemplate(
   templateBytes: Uint8Array,
   plan: FillPlan,
   content: ResumeContent,
+  extraLines: readonly string[] = [],
 ): Promise<FillResult> {
   await assertSafeDocxPackage(templateBytes);
   const zip = await JSZip.loadAsync(templateBytes);
@@ -971,7 +1076,7 @@ export async function fillDocxTemplate(
   if (!documentXml) throw new Error("template has no word/document.xml");
 
   const body = parseTemplateBody(documentXml);
-  const filled = fillTemplateBody(body, plan, content);
+  const filled = fillTemplateBody(body, plan, content, extraLines);
 
   const links = new Map<string, string>();
   const link: LinkRelation = (url) => {

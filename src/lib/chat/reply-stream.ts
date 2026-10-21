@@ -14,7 +14,7 @@ import type { ChatMessage } from "./types";
 export type ReplyStreamEvent =
   | { type: "formatting"; job: FormattingJobView }
   | { type: "delta"; text: string }
-  | { type: "done"; message: ChatMessage }
+  | { type: "done"; message: ChatMessage | null }
   | { type: "error"; code: ErrorCode; message: string };
 
 export const REPLY_STREAM_CONTENT_TYPE = "application/x-ndjson; charset=utf-8";

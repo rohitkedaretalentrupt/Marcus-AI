@@ -14,7 +14,7 @@ import {
  * Bump PARSER_VERSION whenever the rules change so stored results can be
  * re-generated.
  */
-export const PARSER_VERSION = 2;
+export const PARSER_VERSION = 4;
 
 /** Below this many letters/digits the document is treated as having no text (e.g. a scan). */
 const MIN_TEXT_CHARS = 40;
@@ -114,6 +114,8 @@ register("certifications", [
   "accreditations",
 ]);
 register("custom", [
+  "capabilities",
+  "key capabilities",
   "languages",
   "awards",
   "honors",
@@ -321,6 +323,19 @@ function parseEntries(lines: string[]): ResumeEntry[] {
   return entries;
 }
 
+/**
+ * A sentence ("Led post-merger consolidation across Canada, the U.S., and
+ * Mexico.") under a skills-like heading is one point, not a comma list: it
+ * ends with a period and reads as running text (several lowercase words).
+ */
+function isSentenceLine(line: string): boolean {
+  if (!/[.!]$/.test(line)) return false;
+  const words = line.split(/\s+/);
+  if (words.length < 6) return false;
+  const lowercase = words.filter((word) => /^[a-z]/.test(word)).length;
+  return lowercase >= 3;
+}
+
 function parseSkills(lines: string[]): ResumeEntry[] {
   const items: string[] = [];
   for (const raw of lines) {
@@ -329,6 +344,10 @@ function parseSkills(lines: string[]): ResumeEntry[] {
     const colon = line.indexOf(":");
     if (colon > 0 && colon <= 30) {
       items.push(line); // "Languages: Python, Go" stays one categorised item
+      continue;
+    }
+    if (isSentenceLine(line)) {
+      items.push(line);
       continue;
     }
     for (const item of line.split(/\s*[,;•|·]\s*/)) if (item.trim()) items.push(item.trim());

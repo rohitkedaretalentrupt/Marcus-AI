@@ -156,6 +156,44 @@ describe.skipIf(!TEST_DATABASE_URL)("resume extraction (PostgreSQL)", async () =
     expect(await extract(alice, fileId)).toMatchObject({ status: "READY" });
   });
 
+  it("refreshes a reading made by an older parser in place, staying READY", async () => {
+    const fileId = await uploadedFile(alice, await makeDocx(SAMPLE_RESUME_LINES), DOCX);
+    await extract(alice, fileId);
+    // Pretend it was read by an older parser version, from text with a sentence under Skills.
+    await db.resumeExtraction.update({
+      where: { uploadedFileId: fileId },
+      data: {
+        parserVersion: 1,
+        rawText: [
+          "Sam Rivera",
+          "sam@example.test",
+          "",
+          "Skills",
+          "Roadmapping, Stakeholder Management",
+          "Led post-merger consolidation across Canada, the U.S., and Mexico.",
+        ].join("\n"),
+      },
+    });
+
+    await service.refreshOutdatedExtraction(alice, fileId);
+
+    const row = await db.resumeExtraction.findUniqueOrThrow({ where: { uploadedFileId: fileId } });
+    const { PARSER_VERSION } = await import("@/lib/resumes/parse-resume");
+    expect(row).toMatchObject({ status: "READY", parserVersion: PARSER_VERSION });
+    const skills = (
+      row.content as { sections: { title: string; entries: { bullets: string[] }[] }[] }
+    ).sections.find((section) => section.title === "Skills");
+    expect(skills?.entries[0]?.bullets).toContain(
+      "Led post-merger consolidation across Canada, the U.S., and Mexico.",
+    );
+    // Reading it again changes nothing.
+    await service.refreshOutdatedExtraction(alice, fileId);
+    expect(
+      (await db.resumeExtraction.findUniqueOrThrow({ where: { uploadedFileId: fileId } }))
+        .parserVersion,
+    ).toBe(PARSER_VERSION);
+  });
+
   it("does not start a duplicate run while one is in progress", async () => {
     const fileId = await uploadedFile(alice, await makePdf(SAMPLE_RESUME_LINES), PDF);
     const first = await service.startResumeExtraction(alice, fileId);

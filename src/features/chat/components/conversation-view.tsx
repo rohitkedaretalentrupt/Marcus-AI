@@ -95,8 +95,8 @@ export function ConversationView({
 
   // The finished reply (saved once on the server) replaces the streaming one in the same render.
   const onReply = useCallback(
-    (reply: ChatMessage) => {
-      setConfirmed((current) => [...current, reply]);
+    (reply: ChatMessage | null) => {
+      if (reply) setConfirmed((current) => [...current, reply]);
       router.refresh();
     },
     [router],
@@ -216,7 +216,12 @@ export function ConversationView({
     return byMessage;
   }, [messages, formattingJobs]);
   const lastMessage = messages.at(-1);
-  const awaitingReply = aiEnabled && lastMessage?.role === "USER" && lastMessage.status === "sent";
+  // A message whose formatting card is showing is answered by that card.
+  const awaitingReply =
+    aiEnabled &&
+    lastMessage?.role === "USER" &&
+    lastMessage.status === "sent" &&
+    !jobsAfter.has(lastMessage.id);
 
   // New chat: the first message was created on the previous screen; ask for
   // the reply once, then drop the query flag so a reload does not repeat it.

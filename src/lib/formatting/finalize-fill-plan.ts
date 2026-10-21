@@ -344,6 +344,112 @@ export function finalizeFillPlan(
     }
   }
 
+  // A repeat group must hold ONE sample entry. When the plan's group spans
+  // several of the template's sample jobs and fills the later ones with
+  // explicit references ("s3.e1.heading"), every clone would print every
+  // sample job's lines again (each real job shown three times). The group is
+  // cut where the second sample job starts; that job's lines are cleared.
+  {
+    const dropped = new Set<string>();
+    const cutGroups = aiPlan.groups.map((group) => {
+      // A table group per item (one skill per row) repeats ONE row. When the
+      // plan lists several sample rows and fills each, every item would be
+      // printed once per sample row: only the first filled row stays.
+      if (group.per === "item" && group.rows.length > 1) {
+        const filledRows = group.rows.filter((row) =>
+          aiPlan.fills.some((fill) => fill.block.startsWith(`${row}.`)),
+        );
+        if (filledRows.length > 1) {
+          for (const row of group.rows.filter((id) => id !== filledRows[0])) dropped.add(row);
+          return { ...group, rows: [filledRows[0]!] };
+        }
+        return group;
+      }
+      if (group.per !== "entry" || group.rows.length > 0 || group.blocks.length < 2) return group;
+      const own = new RegExp(`^${group.source}\\.e(\\d+)\\.`);
+      let first: string | null = null;
+      let cut = -1;
+      group.blocks.forEach((id, index) => {
+        const fill = aiPlan.fills.find((candidate) => candidate.block === id);
+        for (const ref of fill?.refs ?? []) {
+          for (const part of ref ? refParts(ref) : []) {
+            const entry = own.exec(part)?.[1];
+            if (entry === undefined) {
+              // Another section's content (a specific entry, or a whole
+              // section) in a later line is not part of this entry.
+              if (index > 0 && /^s\d+(?:\.e\d+\.|$)/.test(part) && cut === -1) cut = index;
+              continue;
+            }
+            if (first === null) first = entry;
+            else if (entry !== first && cut === -1) cut = index;
+          }
+        }
+      });
+      if (cut <= 0) return group;
+      for (const id of group.blocks.slice(cut)) dropped.add(id);
+      return { ...group, blocks: group.blocks.slice(0, cut) };
+    });
+    if (dropped.size > 0) {
+      aiPlan = {
+        ...aiPlan,
+        groups: cutGroups,
+        fills: aiPlan.fills.filter(
+          (fill) =>
+            !dropped.has(fill.block) && ![...dropped].some((id) => fill.block.startsWith(`${id}.`)),
+        ),
+        clears: [...new Set([...aiPlan.clears, ...dropped])],
+        keeps: aiPlan.keeps.filter((id) => !dropped.has(id)),
+      };
+    }
+  }
+
+  // A specific field of a specific entry ("s2.e0.subheading") is shown once:
+  // when the plan puts it in two lines, the first (in document order) keeps
+  // it and the later line loses that part (a line left empty is cleared).
+  {
+    const order = new Map<string, number>();
+    blocks.forEach((block, index) => {
+      if (block.kind === "paragraph") order.set(block.id, index);
+      else
+        block.rows.forEach((row, r) =>
+          row.cells.forEach((cell, c) => order.set(cell.id, index + (r * 100 + c) / 100000)),
+        );
+    });
+    const inGroupBlocks = new Set(
+      aiPlan.groups.flatMap((group) => [
+        ...group.blocks,
+        ...group.rows.flatMap((row) => [row, ...(rows.get(row)?.cellIds ?? [])]),
+      ]),
+    );
+    const seen = new Set<string>();
+    const removed = new Set<string>();
+    const fills = aiPlan.fills
+      .map((fill) => ({ ...fill }))
+      .sort((a, b) => (order.get(a.block) ?? 1e9) - (order.get(b.block) ?? 1e9));
+    for (const fill of fills) {
+      if (inGroupBlocks.has(fill.block)) continue;
+      fill.refs = fill.refs.map((ref) => {
+        if (ref === null || ref === "-") return ref;
+        const kept = refParts(ref).filter((part) => {
+          if (!/^s\d+\.e\d+\.\w+$/.test(part)) return true;
+          if (seen.has(part)) return false;
+          seen.add(part);
+          return true;
+        });
+        return kept.length === refParts(ref).length ? ref : kept.length ? kept.join("+") : "-";
+      });
+      if (fill.refs.every((ref) => ref === "-") && paragraphs.has(fill.block))
+        removed.add(fill.block);
+    }
+    if (seen.size > 0) {
+      aiPlan = {
+        ...aiPlan,
+        fills: fills.filter((fill) => !removed.has(fill.block)),
+        clears: [...new Set([...aiPlan.clears, ...removed])],
+      };
+    }
+  }
+
   // --- 2. groups ---
   const groups: FillGroup[] = [];
   const grouped = new Map<string, FillGroup>(); // block/row id → its group
@@ -418,6 +524,45 @@ export function finalizeFillPlan(
       for (const cellId of rows.get(id)!.cellIds) grouped.set(cellId, group);
   }
 
+  // The blank line(s) the template leaves between its sample entries
+  // separate the cloned entries too. The plan's group often covers only the
+  // sample entry's first lines (its other bullets are cleared), so the
+  // separator is the first blank line after the group, however many sample
+  // bullets sit in between: the group is extended up to and including it.
+  groups.forEach((group, at) => {
+    if (group.per !== "entry" || group.blocks.length === 0) return;
+    const last = paragraphs.get(group.blocks.at(-1)!);
+    // (A group that already ends with its blank separator needs no extension.)
+    if (!last || last.info.empty) return;
+    const planFilled = new Set(aiPlan.fills.map((fill) => fill.block));
+    const planKept = new Set(aiPlan.keeps);
+    const rest: string[] = [];
+    let found = false;
+    for (let index = last.index + 1; index < blocks.length && rest.length < 60; index++) {
+      const block = blocks[index]!;
+      if (block.kind !== "paragraph" || grouped.has(block.id) || planFilled.has(block.id)) break;
+      if (planKept.has(block.id) || block.sectionEnd) break;
+      if (block.empty) {
+        rest.push(block.id);
+        found = true;
+        // A separator of two blank lines stays two.
+        const following = blocks[index + 1];
+        if (following?.kind === "paragraph" && following.empty && !following.sectionEnd) {
+          const id = following.id;
+          if (!grouped.has(id) && !planFilled.has(id) && !planKept.has(id)) rest.push(id);
+        }
+        break;
+      }
+      // The rest of the sample entry — never the next section's heading.
+      if (isHeadingLike(block) && kindOfHeading(block.text) !== null) break;
+      rest.push(block.id);
+    }
+    if (!found) return;
+    const extended = { ...group, blocks: [...group.blocks, ...rest] };
+    groups[at] = extended;
+    for (const id of extended.blocks) grouped.set(id, extended);
+  });
+
   // --- 1. fills ---
   const fills: Fill[] = [];
   const filledBlocks = new Set<string>();
@@ -458,6 +603,22 @@ export function finalizeFillPlan(
     );
   const groupSources = new Set(groups.map((group) => group.source));
   const shownSections = new Set<string>();
+  // Sections with some entry placed by an explicit "sN.eK.field" reference
+  // (wherever the plan lists it): the whole section is not shown again.
+  const sectionsWithEntries = new Set<string>();
+  for (const fill of aiPlan.fills) {
+    if (grouped.has(fill.block)) continue;
+    for (const ref of fill.refs) {
+      for (const part of ref ? refParts(ref) : []) {
+        const section = /^(s\d+)\.e\d+\./.exec(part)?.[1];
+        if (section) sectionsWithEntries.add(section);
+      }
+    }
+  }
+  // Static wording the plan wrongly filled ("Available on request …") stays.
+  const refusedKeep = new Set<string>();
+  const STATIC_WORDING =
+    /\b(?:available|upon request|on request|references?|confidential|proprietary|all rights|equal opportunity)\b/i;
   const summaryPlaces: { block: string; score: number }[] = [];
   for (const fill of aiPlan.fills) {
     if (labelClears.has(fill.block) || grouped.has(fill.block) || !knownBlock(fill.block)) continue;
@@ -477,15 +638,22 @@ export function finalizeFillPlan(
       labelClears.add(fill.block);
       continue;
     }
-    const again = parts.find(
-      (part) =>
-        groupSources.has(/^s\d+/.exec(part)?.[0] ?? "") ||
-        (/^s\d+$/.test(part) && shownSections.has(part)),
-    );
+    const again = parts.find((part) => {
+      const section = /^s\d+/.exec(part)?.[0] ?? "";
+      if (groupSources.has(section)) return true;
+      if (/^s\d+$/.test(part)) return shownSections.has(part) || sectionsWithEntries.has(part);
+      return /^s\d+\.e\d+\./.test(part) && shownSections.has(section);
+    });
     if (again) {
       issues.push(`Block "${fill.block}" shows "${again}", which is already shown elsewhere.`);
-      labelClears.add(fill.block);
+      const text = paragraphs.get(fill.block)?.info.text ?? "";
+      if (text.length <= 120 && STATIC_WORDING.test(text)) refusedKeep.add(fill.block);
+      else labelClears.add(fill.block);
       continue;
+    }
+    for (const part of parts) {
+      const section = /^(s\d+)\.e\d+\./.exec(part)?.[1];
+      if (section) sectionsWithEntries.add(section);
     }
     // The summary is a paragraph of text: a short bold or centered header
     // line (the name or contact line under it) is no place for it.
@@ -534,7 +702,12 @@ export function finalizeFillPlan(
     }
   }
   for (const fill of aiPlan.fills) {
-    if (labelClears.has(fill.block) || sectionHeadings.has(fill.block)) continue;
+    if (
+      labelClears.has(fill.block) ||
+      sectionHeadings.has(fill.block) ||
+      refusedKeep.has(fill.block)
+    )
+      continue;
     if (!knownBlock(fill.block)) {
       issues.push(`Block "${fill.block}" does not exist.`);
       continue;
@@ -699,21 +872,50 @@ export function finalizeFillPlan(
   // repeats fields an earlier line already shows keeps only the new ones.
   for (const group of groups) {
     const ids = group.blocks.length ? group.blocks : group.rows;
+    const ownSection = new RegExp(`^${group.source}\\.e\\d+\\.(\\w+)$`);
     const shown = new Set<string>();
     for (const fill of fills) {
       if (!ids.some((id) => fill.block === id || fill.block.startsWith(`${id}.`))) continue;
       fill.refs = fill.refs.map((ref) => {
         if (ref === null || ref === "-") return ref;
-        const fresh = refParts(ref).filter((part) => {
-          const field = /^entry\.(\w+)$/.exec(part)?.[1];
-          if (!field || field === "item" || field === "text") return true;
+        const fresh = refParts(ref).flatMap((part) => {
+          // (An explicit reference to the group's own section reads as the entry's.)
+          const field = /^entry\.(\w+)$/.exec(part)?.[1] ?? ownSection.exec(part)?.[1];
+          if (!field || field === "item") return [part];
+          if (field === "text") {
+            // "text" is the description and the bullets: only what no earlier
+            // line already shows is left.
+            const left = ["description", "bullets"].filter((name) => !shown.has(name));
+            for (const name of left) shown.add(name);
+            if (left.length === 0) return [];
+            return left.length === 2 ? [part] : [`entry.${left[0]}`];
+          }
           const covers = field === "dates" ? ["dates", "startDate", "endDate"] : [field];
-          if (covers.some((name) => shown.has(name))) return false;
+          if (covers.some((name) => shown.has(name))) return [];
           for (const name of covers) shown.add(name);
-          return true;
+          return [part];
         });
         return fresh.length ? fresh.join("+") : "-";
       });
+    }
+    // A per-item group shows the item once: when the plan filled several of
+    // its sample lines with the item (or its fields), only the first stays.
+    if (group.per === "item") {
+      const filledLines = fills.filter((fill) => group.blocks.includes(fill.block));
+      for (const extra of filledLines.slice(1)) {
+        fills.splice(fills.indexOf(extra), 1);
+        filledBlocks.delete(extra.block);
+        labelClears.add(extra.block);
+      }
+    }
+    // A line left with nothing to show would stay as a blank line in every
+    // clone: it is removed instead.
+    for (const fill of [...fills]) {
+      if (!group.blocks.includes(fill.block)) continue;
+      if (!fill.refs.every((ref) => ref === "-")) continue;
+      fills.splice(fills.indexOf(fill), 1);
+      filledBlocks.delete(fill.block);
+      labelClears.add(fill.block);
     }
   }
 
@@ -866,6 +1068,7 @@ export function finalizeFillPlan(
 
   // --- keeps and clears ---
   const keeps = aiPlan.keeps.filter((id) => knownBlock(id) || rows.has(id));
+  for (const id of refusedKeep) if (!keeps.includes(id)) keeps.push(id);
   // The client's own questions ("1. Are you able to lift 50 lbs?") are form
   // text and always stay; only the sample answers under them go.
   for (const [id, { info }] of paragraphs) {
@@ -874,6 +1077,15 @@ export function finalizeFillPlan(
     }
   }
   const protectedIds = new Set([...filledBlocks, ...keeps, ...grouped.keys()]);
+  const separators = new Set<string>();
+  for (const group of groups) {
+    if (group.per !== "entry") continue;
+    for (let at = group.blocks.length - 1; at > 0; at--) {
+      const id = group.blocks[at]!;
+      if (!paragraphs.get(id)?.info.empty) break;
+      separators.add(id);
+    }
+  }
   const clears = new Set<string>();
   for (const id of [...aiPlan.clears, ...labelClears]) {
     if (!knownBlock(id) && !rows.has(id)) {
@@ -883,6 +1095,8 @@ export function finalizeFillPlan(
     // A cleared cell or paragraph inside a group is emptied/omitted in every
     // clone (e.g. a "years of experience" cell); a group row itself cannot go.
     const groupRow = rows.has(id) && grouped.has(id);
+    // The blank line(s) closing an entry group stay: they separate the clones.
+    if (separators.has(id)) continue;
     if (filledBlocks.has(id) || keeps.includes(id) || groupRow) {
       issues.push(`Block "${id}" is both cleared and filled, kept or a repeated row.`);
       continue;

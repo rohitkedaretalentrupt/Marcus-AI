@@ -181,6 +181,37 @@ export async function startResumeExtraction(
   return toView(row);
 }
 
+/**
+ * A resume read with an older parser is read again from the text stored with
+ * it, in place: the status stays READY (nothing is reported as "still being
+ * read", so other jobs are not held up). Never throws; the earlier reading
+ * stays when this one cannot be made.
+ */
+export async function refreshOutdatedExtraction(userId: string, fileId: string): Promise<void> {
+  try {
+    const db = getDb();
+    const outdated = {
+      uploadedFileId: fileId,
+      userId,
+      status: "READY" as const,
+      parserVersion: { lt: PARSER_VERSION },
+    };
+    const row = await db.resumeExtraction.findFirst({ where: outdated, select: { rawText: true } });
+    if (!row?.rawText) return;
+    const parsed = parseResumeText(row.rawText);
+    await db.resumeExtraction.updateMany({
+      where: outdated,
+      data: {
+        parserVersion: PARSER_VERSION,
+        content: parsed.content as Prisma.InputJsonValue,
+        warnings: parsed.warnings,
+      },
+    });
+  } catch (error) {
+    logger.warn("Resume refresh failed", { fileId, reason: errorName(error) });
+  }
+}
+
 const errorName = (error: unknown) => (error instanceof Error ? error.name : typeof error);
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

@@ -165,6 +165,7 @@ describe("DOCX validation", () => {
     expect(await validateDocx(doc.data, more)).toEqual({
       ok: false,
       problems: ["missing 1 text item(s)"],
+      missingTexts: ["Mentored three junior analysts"],
     });
   });
 
