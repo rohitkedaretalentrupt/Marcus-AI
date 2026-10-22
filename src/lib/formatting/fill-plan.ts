@@ -141,6 +141,10 @@ export const fillPlanSchema = aiFillPlanSchema.extend({
   hiddenContactFields: z.array(z.string()).default([]),
   /** The template has no name line: the name is inserted at the top. */
   insertName: z.boolean().default(false),
+  /** Resume sections (indices) whose running text is shown as bullet points. */
+  bulletSections: z.array(z.number().int().min(0).max(99)).max(30).default([]),
+  /** The summary is shown as bullet points. */
+  bulletSummary: z.boolean().default(false),
   source: z.object({
     resumeFileId: z.string().min(1).max(64),
     templateId: z.string().min(1).max(64),

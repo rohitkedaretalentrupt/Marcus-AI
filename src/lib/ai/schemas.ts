@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { resumeContentSchema } from "@/lib/documents";
+import { editActionSchema } from "@/lib/formatting/edits";
 
 /**
  * Schemas for structured model output. Model responses are untrusted input:
@@ -31,6 +32,8 @@ export const resumeTaskOutputSchema = z.object({
 
 export const chatIntentSchema = z.object({
   format: z.boolean(),
+  edits: z.array(editActionSchema).max(12).default([]),
+  unmatchedSections: z.array(z.string().trim().min(1).max(200)).max(12).default([]),
   templates: z.array(z.string().trim().min(1).max(200)).max(12).default([]),
   unmatched: z.array(z.string().trim().min(1).max(200)).max(12).default([]),
 });

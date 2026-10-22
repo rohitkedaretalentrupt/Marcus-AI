@@ -15,6 +15,7 @@ import { getDb } from "@/lib/db/client";
 import { resumeContentSchema } from "@/lib/documents/resume-content";
 import { AppError, ERROR_CODES, NotFoundError } from "@/lib/errors/app-error";
 import { looksLikeFormatRequest, matchTemplateNames } from "@/lib/formatting/chat-request";
+import { describeEdits, editableSections, parseStoredEdits } from "@/lib/formatting/edits";
 import type { FormattingJobView } from "@/lib/formatting/types";
 import { EXTRACTION_FAILURES, type ExtractionFailureCode } from "@/lib/resumes/types";
 import { addAssistantMessage, replyConflict } from "@/server/chat/conversation-service";
@@ -219,10 +220,32 @@ export interface AssistantReplyStream {
 
 /** Recent messages the intent reader sees, and how long it may take before the wording rules decide. */
 const INTENT_HISTORY_MESSAGES = 6;
-const INTENT_TIMEOUT_MS = 10_000;
+const INTENT_TIMEOUT_MS = 15_000;
+const INTENT_ATTEMPTS = 2;
 
 /** What the model writes, after a formatting start, when a message needs no words back. */
 const NO_REPLY_MARKER = "[NO_REPLY]";
+
+/** The newest resume already formatted in this chat (its template and the changes applied), if any. */
+async function lastFormattedIn(
+  userId: string,
+  conversationId: string,
+): Promise<{ template: string; changes: string[] } | null> {
+  try {
+    const job = await getDb().formattingJob.findFirst({
+      where: { userId, conversationId, status: "COMPLETED" },
+      orderBy: { createdAt: "desc" },
+      select: { edits: true, clientTemplate: { select: { name: true } } },
+    });
+    if (!job?.clientTemplate) return null;
+    return {
+      template: job.clientTemplate.name,
+      changes: describeEdits(parseStoredEdits(job.edits)),
+    };
+  } catch {
+    return null;
+  }
+}
 
 /** The account's first name, if it has one (for the occasional personal touch). */
 async function firstNameOf(userId: string): Promise<string | null> {
@@ -313,28 +336,38 @@ export async function startAssistantReply(
       templates.availableTemplates.length > 0 &&
       attachedResumes.length > 0
     ) {
-      try {
-        intent = await provider.classifyChatIntent(
-          {
-            instruction: latest.content,
-            history: earlier
-              .slice(0, INTENT_HISTORY_MESSAGES)
-              .reverse()
-              .map(toTurn)
-              .filter((turn): turn is ChatTurn => turn !== null),
-            availableTemplates: templates.availableTemplates,
-            selectedTemplate: templates.selectedTemplate,
-            hasResume: true,
-          },
-          { signal: AbortSignal.any([signal, AbortSignal.timeout(INTENT_TIMEOUT_MS)]) },
-        );
-      } catch {
-        intent = null; // the wording rules below take over
+      const intentInput = {
+        instruction: latest.content,
+        history: earlier
+          .slice(0, INTENT_HISTORY_MESSAGES)
+          .reverse()
+          .map(toTurn)
+          .filter((turn): turn is ChatTurn => turn !== null),
+        availableTemplates: templates.availableTemplates,
+        selectedTemplate: templates.selectedTemplate,
+        hasResume: true,
+        resumeSections: attachedResumes[0]?.content
+          ? editableSections(attachedResumes[0].content)
+          : [],
+        lastFormatted: await lastFormattedIn(userId, id),
+      };
+      // A slow or failed reading is tried once more before the wording rules take over.
+      for (let attempt = 1; attempt <= INTENT_ATTEMPTS && !intent && !signal.aborted; attempt++) {
+        try {
+          intent = await provider.classifyChatIntent(intentInput, {
+            signal: AbortSignal.any([signal, AbortSignal.timeout(INTENT_TIMEOUT_MS)]),
+          });
+        } catch (error) {
+          logger.warn("Reading the chat request failed", {
+            attempt,
+            error: error instanceof Error ? error.name : "unknown",
+          });
+        }
       }
     }
     const wantsFormatting =
       intent !== null
-        ? intent.format
+        ? intent.format || intent.edits.length > 0
         : looksLikeFormatRequest(latest.content, {
             previousReply,
             templateNames: templates.availableTemplates,
@@ -350,18 +383,24 @@ export async function startAssistantReply(
       const mentioned = named.filter((name) => inMessage.includes(name.toLowerCase()));
       if (mentioned.length > 0) named = mentioned;
       const outcome: Awaited<ReturnType<typeof startChatFormatting>> =
-        intent && named.length === 0 && intent.unmatched.length > 0
+        intent && intent.edits.length === 0 && intent.unmatchedSections.length > 0
           ? {
               status: "not_started",
-              reason: `No client template matches ${intent.unmatched.map((name) => `"${name}"`).join(", ")}. The templates are: ${templates.availableTemplates.join(", ")}.`,
+              reason: `The resume has no section called ${intent.unmatchedSections.map((name) => `"${name}"`).join(", ")}. Its sections are: ${(attachedResumes[0]?.content ? editableSections(attachedResumes[0].content) : []).join(", ")}.`,
             }
-          : await deps.startFormatting(
-              userId,
-              id,
-              latest.content,
-              previousReply,
-              named.length > 0 ? named : undefined,
-            );
+          : intent && named.length === 0 && intent.unmatched.length > 0
+            ? {
+                status: "not_started",
+                reason: `No client template matches ${intent.unmatched.map((name) => `"${name}"`).join(", ")}. The templates are: ${templates.availableTemplates.join(", ")}.`,
+              }
+            : await deps.startFormatting(
+                userId,
+                id,
+                latest.content,
+                previousReply,
+                named.length > 0 ? named : undefined,
+                intent && intent.edits.length > 0 ? intent.edits : undefined,
+              );
       if (outcome.status === "started") formattingJob = outcome.job;
       formatting =
         outcome.status === "started"
@@ -373,6 +412,7 @@ export async function startAssistantReply(
                   .filter(Boolean)
                   .join(", ") || null,
               resumeFilename: outcome.job.resume?.filename ?? null,
+              changes: outcome.job.edits,
             }
           : outcome;
     }

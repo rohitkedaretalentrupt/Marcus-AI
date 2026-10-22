@@ -44,6 +44,8 @@ export interface FormattingJobView {
   warnings: string[];
   document: { filename: string; sizeBytes: number } | null;
   canRetry: boolean;
+  /** Changes asked for in chat, in words ("Without Skills", "Education as bullets"). */
+  edits: string[];
   aiModel: string | null;
   engineVersion: number;
   /** Conversation the job was started from (null for older jobs). */

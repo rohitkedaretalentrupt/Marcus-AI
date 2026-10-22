@@ -972,6 +972,89 @@ describe("DOCX template fill engine", () => {
     expect(plan.additional).toContain(`s${extra}.e0`);
   });
 
+  it("shows a section's text as bullets in the template's own bullet style when asked", async () => {
+    const { Document, Packer, Paragraph, TextRun, LevelFormat, AlignmentType } =
+      await import("docx");
+    const bold = (text: string) => new Paragraph({ children: [new TextRun({ text, bold: true })] });
+    const template = new Uint8Array(
+      await Packer.toBuffer(
+        new Document({
+          numbering: {
+            config: [
+              {
+                reference: "dots",
+                levels: [
+                  {
+                    level: 0,
+                    format: LevelFormat.BULLET,
+                    text: "•",
+                    alignment: AlignmentType.LEFT,
+                  },
+                ],
+              },
+            ],
+          },
+          sections: [
+            {
+              children: [
+                bold("Pat Example-Sample"),
+                bold("Summary:"),
+                // The template shows its summary as one plain paragraph.
+                new Paragraph("Sample summary sentence one. Sample summary sentence two."),
+                bold("Skills:"),
+                new Paragraph({ numbering: { reference: "dots", level: 0 }, text: "Sample skill" }),
+              ],
+            },
+          ],
+        }),
+      ),
+    );
+    const blocks = await readTemplateBlocks(template);
+    const { paragraph } = ids(blocks);
+    const raw = aiFillPlanSchema.parse({
+      version: 1,
+      fills: [
+        { block: paragraph("Pat Example"), refs: ["contact.fullName"] },
+        { block: paragraph("Sample summary"), refs: ["summary"] },
+        { block: paragraph("Sample skill"), refs: ["entry.item"] },
+      ],
+      groups: [{ source: "s1", per: "item", blocks: [paragraph("Sample skill")] }],
+    });
+    const { plan } = finalizeFillPlan(raw, RESUME, blocks, source);
+    const bulleted = { ...plan, bulletSummary: true };
+    const filled = await fillDocxTemplate(
+      template,
+      bulleted,
+      contentShownByFillPlan(RESUME, bulleted),
+    );
+    const xml = await (
+      await JSZip.loadAsync(filled.data)
+    )
+      .file("word/document.xml")!
+      .async("string");
+    const lines = [...xml.matchAll(/<w:p[ >][\s\S]*?<\/w:p>/g)].map((m) => ({
+      text: [...m[0].matchAll(/<w:t[^>]*>([^<]*)/g)].map((a) => a[1]).join(""),
+      bullet: m[0].includes("<w:numPr>"),
+    }));
+    // Each sentence of the summary is its own bullet line.
+    expect(
+      lines.find((l) => l.text === "Forklift operator with safe material handling experience."),
+    ).toMatchObject({ bullet: true });
+    expect(lines.find((l) => l.text === "Trains new operators.")).toMatchObject({ bullet: true });
+    // The name and the headings are not bullets.
+    expect(lines.find((l) => l.text === "Summary:")).toMatchObject({ bullet: false });
+    // Without the request the summary stays one plain paragraph.
+    const plain = await fillDocxTemplate(template, plan, contentShownByFillPlan(RESUME, plan));
+    const plainXml = await (
+      await JSZip.loadAsync(plain.data)
+    )
+      .file("word/document.xml")!
+      .async("string");
+    expect(plainXml).toContain(
+      "Forklift operator with safe material handling experience. Trains new operators.",
+    );
+  });
+
   it("shows a single date column as the whole date range", async () => {
     const blocks = await readTemplateBlocks(await makeFormTemplateDocx());
     const raw = goodPlan(blocks);

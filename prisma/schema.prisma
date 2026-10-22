@@ -326,6 +326,8 @@ model FormattingJob {
   plan                Json?
   /// User-facing notes (e.g. content that was placed automatically).
   warnings            Json?
+  /// Changes the person asked for in chat: sections left out, sections shown as bullets.
+  edits               Json?
   /// Internal failure code; mapped to safe messages.
   failureCode         String?
   /// Number of processing runs started (first run + retries).

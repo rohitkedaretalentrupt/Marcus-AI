@@ -521,6 +521,7 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
         "Format my resume using Zillow",
         null,
         undefined,
+        undefined,
       );
       // The progress card is the whole answer: the marker is never shown, nothing is saved.
       expect(events).toMatchObject([{ type: "formatting" }, { type: "done", message: null }]);
@@ -566,7 +567,14 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
       });
       const { startFormatting, deps: d } = withFormatting({ status: "started", job, jobs: [job] });
       await eventsOf(conversation.id, d);
-      expect(startFormatting).toHaveBeenCalledWith(alice, conversation.id, "yes", offer, undefined);
+      expect(startFormatting).toHaveBeenCalledWith(
+        alice,
+        conversation.id,
+        "yes",
+        offer,
+        undefined,
+        undefined,
+      );
     });
 
     it("when formatting cannot start, the model gets the reason and no card is announced", async () => {
@@ -615,13 +623,15 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
         format: boolean;
         templates: string[];
         unmatched: string[];
+        edits: { action: "remove" | "restore" | "bullets" | "paragraph"; section: string }[];
+        unmatchedSections?: string[];
       }) {
         const seen: unknown[] = [];
         const provider = createFakeAIProvider({
           modelName: "fake",
           classifyChatIntent: async (input) => {
             seen.push(input);
-            return intent;
+            return { unmatchedSections: [], ...intent };
           },
           streamResumeTask: async function* (input) {
             calls.push(input);
@@ -648,6 +658,7 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
           format: true,
           templates: ["BNP"],
           unmatched: [],
+          edits: [],
         });
         const { startFormatting, deps: d } = withFormatting(
           { status: "started", job, jobs: [job] },
@@ -661,6 +672,7 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
           "Galti ho gayi yr , bnp ke liye karo",
           null,
           ["BNP"],
+          undefined,
         );
         expect(seen[0]).toMatchObject({
           instruction: "Galti ho gayi yr , bnp ke liye karo",
@@ -679,6 +691,7 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
           format: true,
           templates: ["Bayer", "BNP", "Cigna"],
           unmatched: [],
+          edits: [],
         });
         const { startFormatting, deps: d } = withFormatting(
           { status: "started", job, jobs: [job] },
@@ -691,13 +704,68 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
           "Galti ho gayi yr , bnp ke liye karo",
           null,
           ["BNP"],
+          undefined,
         );
+      });
+
+      it("passes the changes the model read to the formatter (a request with no template named)", async () => {
+        await readyTemplate("BNP");
+        const conversationId = await chatWithResume("skills hata do yaar");
+        const { provider, seen } = providerReading({
+          format: true,
+          templates: [],
+          unmatched: [],
+          edits: [{ action: "remove", section: "Skills" }],
+        });
+        const { startFormatting, deps: d } = withFormatting(
+          { status: "started", job, jobs: [job] },
+          provider,
+        );
+        const events = await eventsOf(conversationId, d);
+        expect(startFormatting).toHaveBeenCalledWith(
+          alice,
+          conversationId,
+          "skills hata do yaar",
+          null,
+          undefined,
+          [{ action: "remove", section: "Skills" }],
+        );
+        // The model is shown the resume's sections to name them from.
+        expect(seen[0]).toMatchObject({ resumeSections: expect.any(Array) });
+        expect(events[0]).toMatchObject({ type: "formatting" });
+      });
+
+      it("says so when the person names a section the resume does not have", async () => {
+        await readyTemplate("BNP");
+        const conversationId = await chatWithResume("remove the hobbies section");
+        const { provider } = providerReading({
+          format: true,
+          templates: [],
+          unmatched: [],
+          edits: [],
+          unmatchedSections: ["hobbies"],
+        });
+        const { startFormatting, deps: d } = withFormatting(
+          { status: "started", job, jobs: [job] },
+          provider,
+        );
+        await eventsOf(conversationId, d);
+        expect(startFormatting).not.toHaveBeenCalled();
+        expect(calls.at(-1)!.formatting).toMatchObject({
+          status: "not_started",
+          reason: expect.stringContaining('no section called "hobbies"'),
+        });
       });
 
       it("does not format when the model says the message is not a request", async () => {
         await readyTemplate("BNP");
         const conversationId = await chatWithResume("format for bnp was great, thanks!");
-        const { provider } = providerReading({ format: false, templates: [], unmatched: [] });
+        const { provider } = providerReading({
+          format: false,
+          templates: [],
+          unmatched: [],
+          edits: [],
+        });
         const { startFormatting, deps: d } = withFormatting(
           { status: "started", job, jobs: [job] },
           provider,
@@ -711,7 +779,12 @@ describe.skipIf(!TEST_DATABASE_URL)("assistant replies (PostgreSQL, mocked AI)",
       it("does not guess when the person names something that matches no template", async () => {
         await readyTemplate("BNP");
         const conversationId = await chatWithResume("do it for bjs");
-        const { provider } = providerReading({ format: true, templates: [], unmatched: ["bjs"] });
+        const { provider } = providerReading({
+          format: true,
+          templates: [],
+          unmatched: ["bjs"],
+          edits: [],
+        });
         const { startFormatting, deps: d } = withFormatting(
           { status: "started", job, jobs: [job] },
           provider,

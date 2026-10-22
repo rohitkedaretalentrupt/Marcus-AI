@@ -24,7 +24,6 @@ import { AssistantReplyStatus } from "./assistant-reply-status";
 import { ChatComposer } from "./chat-composer";
 import { ChatEmptyState } from "./chat-empty-state";
 import { ChatHeader } from "./chat-header";
-import { ConversationMenu } from "./conversation-menu";
 import type { MessageActions } from "./message-item";
 import { MessageList } from "./message-list";
 
@@ -296,13 +295,6 @@ export function ConversationView({
         title={conversation.title}
         subtitle={
           conversation.clientTemplate ? `Template: ${conversation.clientTemplate.name}` : undefined
-        }
-        actions={
-          <ConversationMenu
-            conversationId={conversation.id}
-            title={conversation.title}
-            templateId={conversation.clientTemplate?.id ?? null}
-          />
         }
       />
       {messages.length === 0 ? (

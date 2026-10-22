@@ -30,6 +30,17 @@ import {
   startChatFormattingSchema,
 } from "@/lib/formatting/chat-request";
 import { generatedFilename } from "@/lib/formatting/filename";
+import {
+  applyEdits,
+  applyEditActions,
+  describeEdits,
+  editableSections,
+  hasEdits,
+  NO_EDITS,
+  parseStoredEdits,
+  resolveSection,
+  type FormattingEdits,
+} from "@/lib/formatting/edits";
 import { contentShownByPlan, toAIResumeView } from "@/lib/formatting/content-refs";
 import type { FillPlan } from "@/lib/formatting/fill-plan";
 import {
@@ -126,6 +137,7 @@ const jobSelect = {
   status: true,
   failureCode: true,
   warnings: true,
+  edits: true,
   aiModel: true,
   engineVersion: true,
   resumeFileId: true,
@@ -177,6 +189,7 @@ function toView(row: JobRow): FormattingJobView {
     warnings: warningsOf(row.warnings),
     document: row.status === "COMPLETED" ? row.document : null,
     canRetry: canRetry(row),
+    edits: describeEdits(parseStoredEdits(row.edits)),
     aiModel: row.aiModel,
     engineVersion: row.engineVersion,
     conversationId: row.conversationId,
@@ -267,6 +280,8 @@ export async function createFormattingJob(
     conversationId?: string;
     /** Accept a resume that is still being read; the run waits for it. */
     allowPendingResume?: boolean;
+    /** Changes the person asked for (sections left out, shown as bullets). */
+    edits?: FormattingEdits;
   } = {},
 ): Promise<{ job: FormattingJobView; created: boolean }> {
   const { resumeFileId, templateId } = parseOrThrow(createFormattingJobSchema, input);
@@ -325,6 +340,7 @@ export async function createFormattingJob(
           activeKey,
           engineVersion: FORMATTING_ENGINE_VERSION,
           conversationId: options.conversationId,
+          ...(hasEdits(options.edits) ? { edits: options.edits } : {}),
         },
         select: jobSelect,
       });
@@ -594,10 +610,11 @@ export async function startFormattingsFromChat(
   const conversationIdResult = conversationIdSchema.safeParse(conversationId);
   if (!conversationIdResult.success) throw new NotFoundError("Conversation not found.");
   const id = conversationIdResult.data;
-  const { resumeFileId, templateId, text, previousReply, templateNames } = parseOrThrow(
+  const { resumeFileId, templateId, text, previousReply, templateNames, edits } = parseOrThrow(
     startChatFormattingSchema,
     input,
   );
+  const actions = edits ?? [];
   try {
     deps.getProvider();
   } catch {
@@ -638,6 +655,16 @@ export async function startFormattingsFromChat(
     );
   }
 
+  // A change to a formatted resume ("remove the skills section") without a template
+  // named is about the newest resume formatted in this chat.
+  const newestJob = actions.length
+    ? await db.formattingJob.findFirst({
+        where: { userId, conversationId: id, clientTemplateId: { not: null } },
+        orderBy: { createdAt: "desc" },
+        select: { clientTemplateId: true },
+      })
+    : null;
+
   // Template: explicit → named in the message → named in the reply it answers
   // ("Want me to use Zillow?" → "yes") → selected for this chat.
   let chosenTemplateIds: string[] = templateId ? [templateId] : [];
@@ -660,6 +687,15 @@ export async function startFormattingsFromChat(
       }
       if (!chosenTemplateIds.includes(found.id)) chosenTemplateIds.push(found.id);
     }
+  }
+  if (chosenTemplateIds.length === 0 && actions.length > 0 && newestJob?.clientTemplateId) {
+    chosenTemplateIds = [newestJob.clientTemplateId];
+  }
+  if (chosenTemplateIds.length === 0 && actions.length > 0) {
+    throw chatProblem(
+      "edits",
+      "There's no formatted resume in this chat yet to change. Ask me to format your resume with a client template first, for example by naming one.",
+    );
   }
   if (chosenTemplateIds.length === 0 && (text || previousReply)) {
     const templates = await db.clientTemplate.findMany({
@@ -721,14 +757,51 @@ export async function startFormattingsFromChat(
 
   const started: { job: FormattingJobView; created: boolean }[] = [];
   for (const chosen of chosenTemplateIds) {
-    started.push(
-      await createFormattingJob(
-        userId,
-        { resumeFileId: attachment.uploadedFileId, templateId: chosen },
-        deps,
-        { conversationId: id, allowPendingResume: true },
-      ),
+    let jobEdits: FormattingEdits | undefined;
+    let jobResumeFileId = attachment.uploadedFileId;
+    if (actions.length > 0) {
+      // The changes build on this template's newest resume in this chat.
+      const previous = await db.formattingJob.findFirst({
+        where: { userId, conversationId: id, clientTemplateId: chosen },
+        orderBy: { createdAt: "desc" },
+        select: { edits: true, resumeFileId: true },
+      });
+      if (previous?.resumeFileId) jobResumeFileId = previous.resumeFileId;
+      // Section names are checked against the resume (the model copies them from its list).
+      const extraction = await db.resumeExtraction.findFirst({
+        where: { uploadedFileId: jobResumeFileId, userId, status: "READY" },
+        select: { content: true },
+      });
+      const parsed = resumeContentSchema.safeParse(extraction?.content);
+      const resolved = actions.map((action) => {
+        if (!parsed.success) return action;
+        const section = resolveSection(parsed.data, action.section);
+        if (!section) {
+          throw chatProblem(
+            "edits",
+            `I couldn't find a section called "${action.section}" in the resume. Its sections are: ${editableSections(parsed.data).join(", ")}.`,
+          );
+        }
+        return { ...action, section };
+      });
+      jobEdits = applyEditActions(parseStoredEdits(previous?.edits ?? NO_EDITS), resolved);
+    }
+    const result = await createFormattingJob(
+      userId,
+      { resumeFileId: jobResumeFileId, templateId: chosen },
+      deps,
+      {
+        conversationId: id,
+        allowPendingResume: true,
+        ...(jobEdits ? { edits: jobEdits } : {}),
+      },
     );
+    if (!result.created && actions.length > 0) {
+      throw conflict(
+        "This resume is still being formatted with that template. Let it finish (or stop it), then ask for the change again.",
+      );
+    }
+    started.push(result);
   }
   return started;
 }
@@ -859,6 +932,8 @@ async function fillTemplateDocx(
   signal: AbortSignal,
   /** Sample values the template analysis found (the template's example person). */
   samples: readonly string[],
+  /** Sections (and the summary) the person wants as bullet points. */
+  bullets: { sections: number[]; summary: boolean } = { sections: [], summary: false },
 ): Promise<FillOutcome> {
   let blocks: Awaited<ReturnType<typeof readTemplateBlocks>>;
   try {
@@ -893,7 +968,7 @@ async function fillTemplateDocx(
   const ranked = [...plans].sort((a, b) => fillScore(a) - fillScore(b));
   let firstProblem: string | null = null;
   for (const planned of ranked) {
-    const outcome = await fillAndValidate(templateBytes, planned, content, samples);
+    const outcome = await fillAndValidate(templateBytes, planned, content, samples, bullets);
     if (outcome.ok) return outcome;
     firstProblem ??= outcome.reason;
   }
@@ -906,7 +981,14 @@ async function fillAndValidate(
   planned: FinalizeFillResult,
   content: ResumeContent,
   samples: readonly string[],
+  bullets: { sections: number[]; summary: boolean } = { sections: [], summary: false },
 ): Promise<FillOutcome> {
+  if (bullets.sections.length > 0 || bullets.summary) {
+    planned = {
+      ...planned,
+      plan: { ...planned.plan, bulletSections: bullets.sections, bulletSummary: bullets.summary },
+    };
+  }
   if (planned.plan.fills.length === 0 && planned.plan.groups.length === 0) {
     return { ok: false, reason: "empty fill plan" };
   }
@@ -998,7 +1080,7 @@ export async function runFormattingJob(
   try {
     const job = await db.formattingJob.findFirst({
       where: { id: jobId, userId },
-      select: { resumeFileId: true, clientTemplateId: true },
+      select: { resumeFileId: true, clientTemplateId: true, edits: true },
     });
     if (!job) return null;
 
@@ -1033,6 +1115,8 @@ export async function runFormattingJob(
       : null;
     const content = resumeContentSchema.safeParse(extraction?.content);
     if (!extraction || !content.success) return await fail("resume_unavailable");
+    // What the person asked for in chat (sections left out, shown as bullets).
+    const edited = applyEdits(content.data, parseStoredEdits(job.edits));
 
     const templateRow = job.clientTemplateId
       ? await db.clientTemplate.findFirst({
@@ -1087,10 +1171,11 @@ export async function runFormattingJob(
         outcome = await fillTemplateDocx(
           provider,
           templateBytes,
-          content.data,
+          edited.content,
           source,
           deadline,
           structure.data.placeholders.map((placeholder) => placeholder.text),
+          { sections: edited.bulletSections, summary: edited.bulletSummary },
         );
       } catch (error) {
         if (deadline.aborted) return await fail("ai_timeout", "planning_deadline");
@@ -1111,18 +1196,23 @@ export async function runFormattingJob(
       // 2. Generator: AI FormattingPlan → deterministic renderer.
       let planned: FinalizeResult;
       try {
-        planned = await planFormatting(provider, content.data, structure.data, source, deadline);
+        planned = await planFormatting(provider, edited.content, structure.data, source, deadline);
       } catch (error) {
         if (deadline.aborted) return await fail("ai_timeout", "planning_deadline");
         if (error instanceof AIProviderError) return await fail(aiFailure(error), error.kind);
         throw error;
+      }
+      if (edited.bulletSummary) {
+        planned.plan.sections = planned.plan.sections.map((section) =>
+          section.sources.includes("summary") ? { ...section, textAsBullets: true } : section,
+        );
       }
       storedPlan = planned.plan;
       warnings.push(...planned.warnings);
 
       // Contact details the template has no place for are not part of the
       // document, so they are neither rendered nor expected.
-      const shown = contentShownByPlan(content.data, planned.plan);
+      const shown = contentShownByPlan(edited.content, planned.plan);
       try {
         const rendered = await withTimeout(
           deps.getRenderer().render({ content: shown, plan: planned.plan }),

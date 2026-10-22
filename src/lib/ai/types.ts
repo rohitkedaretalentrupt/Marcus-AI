@@ -93,7 +93,13 @@ export interface ResumeTaskInput {
    * was started, and the reply must not claim otherwise.
    */
   formatting?:
-    | { status: "started"; templateName: string | null; resumeFilename: string | null }
+    | {
+        status: "started";
+        templateName: string | null;
+        resumeFilename: string | null;
+        /** Changes the new version includes, in words ("Without Skills"). */
+        changes?: string[];
+      }
     | { status: "not_started"; reason: string };
 }
 
@@ -107,6 +113,10 @@ export interface ChatIntentInput {
   selectedTemplate?: string | null;
   /** A resume is attached in this conversation. */
   hasResume: boolean;
+  /** The sections of the attached resume the person can refer to ("Summary" included). */
+  resumeSections: string[];
+  /** The newest resume already formatted in this chat, if any. */
+  lastFormatted?: { template: string; changes: string[] } | null;
 }
 
 /** What the person wants the app to do with the latest message. */
@@ -117,6 +127,10 @@ export interface ChatIntent {
   templates: string[];
   /** Names they used that match no available template. */
   unmatched: string[];
+  /** Section names they used that the resume does not have. */
+  unmatchedSections: string[];
+  /** Changes to the formatted resume they ask for (a section left out, or shown as bullets). */
+  edits: { action: "remove" | "restore" | "bullets" | "paragraph"; section: string }[];
 }
 
 /** A client template document, as layout evidence (never the raw file). */

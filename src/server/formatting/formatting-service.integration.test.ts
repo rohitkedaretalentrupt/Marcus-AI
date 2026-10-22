@@ -858,6 +858,133 @@ describe.skipIf(!TEST_DATABASE_URL)("resume formatting (PostgreSQL, mocked AI)",
       expect(job.template?.name).toBe("Bayer");
     });
 
+    describe("changes asked for in chat (sections left out, bullets)", () => {
+      it("applies a change to the newest formatted resume, builds on earlier changes and can undo them", async () => {
+        const { conversationId } = await chatWithResume(alice);
+        await readyTemplate(alice, "Client A");
+        const first = await service.startFormattingsFromChat(
+          alice,
+          conversationId,
+          { text: "format with client a", templateNames: ["Client A"] },
+          deps(),
+        );
+        await service.runFormattingJob(alice, first[0]!.job.id, deps());
+        expect(first[0]!.job.edits).toEqual([]);
+
+        // "remove the skills section" names no template: it changes the newest resume.
+        const second = await service.startFormattingsFromChat(
+          alice,
+          conversationId,
+          { text: "remove the skills section", edits: [{ action: "remove", section: "skills" }] },
+          deps(),
+        );
+        expect(second).toHaveLength(1);
+        expect(second[0]!.job.template?.name).toBe("Client A");
+        expect(second[0]!.job.edits).toEqual(["Without Skills"]);
+        expect(second[0]!.job.id).not.toBe(first[0]!.job.id);
+        await service.runFormattingJob(alice, second[0]!.job.id, deps());
+
+        // A further change adds to it ...
+        const third = await service.startFormattingsFromChat(
+          alice,
+          conversationId,
+          {
+            text: "education as bullets",
+            edits: [{ action: "bullets", section: "Education" }],
+          },
+          deps(),
+        );
+        expect(third[0]!.job.edits).toEqual(["Without Skills", "Education as bullets"]);
+        await service.runFormattingJob(alice, third[0]!.job.id, deps());
+
+        // ... and can be undone.
+        const fourth = await service.startFormattingsFromChat(
+          alice,
+          conversationId,
+          { text: "bring skills back", edits: [{ action: "restore", section: "Skills" }] },
+          deps(),
+        );
+        expect(fourth[0]!.job.edits).toEqual(["Education as bullets"]);
+      });
+
+      it("leaves the section out of the Word file", async () => {
+        const { conversationId } = await chatWithResume(alice);
+        await readyTemplate(alice, "Client A");
+        const [started] = await service.startFormattingsFromChat(
+          alice,
+          conversationId,
+          {
+            text: "format with client a without skills",
+            templateNames: ["Client A"],
+            edits: [{ action: "remove", section: "Skills" }],
+          },
+          deps(),
+        );
+        const job = started!.job;
+        const done = await service.runFormattingJob(alice, job.id, deps());
+        expect(done).toMatchObject({ status: "COMPLETED", edits: ["Without Skills"] });
+        // The AI was never shown the removed section.
+        expect(JSON.stringify(calls.at(-1)!.resume)).not.toContain("Skills");
+        const stored = await db.generatedDocument.findFirstOrThrow({
+          where: { formattingJobId: job.id },
+        });
+        expect(storage.objects.has(stored.storageKey)).toBe(true);
+      });
+
+      it("explains what is missing: nothing formatted yet, or a section the resume doesn't have", async () => {
+        const { conversationId } = await chatWithResume(alice);
+        await readyTemplate(alice, "Client A");
+        await expect(
+          service.startFormattingsFromChat(
+            alice,
+            conversationId,
+            { text: "remove skills", edits: [{ action: "remove", section: "Skills" }] },
+            deps(),
+          ),
+        ).rejects.toMatchObject({
+          publicMessage: expect.stringMatching(/no formatted resume in this chat yet/),
+        });
+
+        const [started] = await service.startFormattingsFromChat(
+          alice,
+          conversationId,
+          { text: "format with client a", templateNames: ["Client A"] },
+          deps(),
+        );
+        const job = started!.job;
+        await service.runFormattingJob(alice, job.id, deps());
+        await expect(
+          service.startFormattingsFromChat(
+            alice,
+            conversationId,
+            { text: "remove hobbies", edits: [{ action: "remove", section: "Hobbies" }] },
+            deps(),
+          ),
+        ).rejects.toMatchObject({
+          publicMessage: expect.stringMatching(/couldn't find a section called "Hobbies"/),
+        });
+      });
+
+      it("does not start a change while the same resume is still being formatted", async () => {
+        const { conversationId } = await chatWithResume(alice);
+        await readyTemplate(alice, "Client A");
+        await service.startFormattingsFromChat(
+          alice,
+          conversationId,
+          { text: "format with client a", templateNames: ["Client A"] },
+          deps(),
+        ); // still queued
+        await expect(
+          service.startFormattingsFromChat(
+            alice,
+            conversationId,
+            { text: "remove skills", edits: [{ action: "remove", section: "Skills" }] },
+            deps(),
+          ),
+        ).rejects.toMatchObject({ status: 409 });
+      });
+    });
+
     it("explains what is missing: no resume in this chat, no template, AI not configured", async () => {
       const { conversation: empty } = await chat.createConversation(alice, { message: "hi" });
       await expect(

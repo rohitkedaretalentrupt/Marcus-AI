@@ -1389,6 +1389,8 @@ export function finalizeFillPlan(
       additional,
       hiddenContactFields: hidden,
       insertName,
+      bulletSections: [],
+      bulletSummary: false,
       source,
     },
     issues,

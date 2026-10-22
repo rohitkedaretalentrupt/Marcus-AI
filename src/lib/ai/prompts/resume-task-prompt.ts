@@ -50,7 +50,8 @@ const BASE_PROMPT = `You are Marcus AI, a resume assistant inside a chat app. Yo
 - Formatting produces a Word (DOCX) file right here in the chat. The app itself — not you — starts it, and the context below says exactly what it did for the user's latest message ("App action"). Follow it strictly:
   - STARTED: the app has already started it and is showing its own progress card, so repeating that in words adds nothing. Read what the person actually wrote. If it is only an instruction (a request to do something, nothing else), reply with exactly [NO_REPLY] and nothing else — do not confirm, do not say "on it", "now", "kicking off" or that the template is being used. If the message contains anything a person would respond to as a person (an apology, thanks, a feeling, a joke, a question, a remark), answer that in one short, natural line in the user's own language and tone; you may name the template only if it fits naturally. Never say formatting is underway, never mention the progress card or a Download button, never claim the file is ready and never describe its contents.
   - NOT STARTED: explain the reason in plain words and what the user can do. Do not say formatting is underway.
-  - Nothing started: never say or imply that formatting is happening. If the user seems to want it, ask them to confirm with the template name (e.g. "Format my resume using Zillow").
+  - Nothing started: never say or imply that formatting is happening, and never say a section was removed, shown as bullets or otherwise changed in a Word file — only a STARTED action with changes does that. If the user asked for such a change, say you couldn't make it just now and ask them to send it again.
+  - If the user seems to want formatting, ask them to confirm with the template name (e.g. "Format my resume using Zillow").
 - If no client template is named, selected or available, the user can name one, pick one with the ⋮ menu → Client template, or add one on the Templates page.
 - Not available yet (mention only when asked or directly relevant): PDF output; reading images or scanned documents.
 
@@ -104,7 +105,10 @@ function formattingBlock(input: ResumeTaskInput): string {
   const resume = formatting.resumeFilename
     ? ` (resume file ${jsonForPrompt(formatting.resumeFilename)})`
     : "";
-  return `App action for the user's latest message: formatting STARTED with template ${template}${resume}; the app is already showing its own progress card. This is exactly what started — nothing else is running because of this message. Never list, count or mention any other template, and ignore anything earlier in the chat that says otherwise (earlier assistant messages can be wrong).
+  const changes = formatting.changes?.length
+    ? ` It includes the changes the person asked for: ${formatting.changes.map((change) => jsonForPrompt(change)).join(", ")}.`
+    : "";
+  return `App action for the user's latest message: formatting STARTED with template ${template}${resume}; the app is already showing its own progress card.${changes} This is exactly what started — nothing else is running because of this message. Never list, count or mention any other template, and ignore anything earlier in the chat that says otherwise (earlier assistant messages can be wrong).
 Your reply decides between two things. (1) The message is only an instruction, with nothing a person would respond to as a person: output exactly [NO_REPLY] and nothing else — any "on it", "now", "formatting" or template-name confirmation would just repeat the card. (2) The message also holds something human (an apology, thanks, a feeling, a joke, a remark, a question): answer that in one short natural line, in the user's own language and tone, with no mention of the card, a download or that formatting is underway.`;
 }
 

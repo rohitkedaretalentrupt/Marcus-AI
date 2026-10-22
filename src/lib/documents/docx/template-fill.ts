@@ -86,6 +86,8 @@ interface Context {
   source?: string;
   /** The block is a list item: running text becomes one line per sentence. */
   numbered: boolean;
+  /** The person asked for this text as bullets: one line per sentence, whatever the template block is. */
+  forceBullets?: boolean;
 }
 
 interface Link {
@@ -268,7 +270,7 @@ function fillParagraph(
   content: ResumeContent,
   ctx: Context,
 ): ParagraphNode[] {
-  const context = { ...ctx, numbered: isNumbered(paragraph) };
+  const context = { ...ctx, numbered: isNumbered(paragraph) || !!ctx.forceBullets };
   const segments = paragraphSegments(paragraph);
   // More values than the line has parts: the extra ones join the last part
   // ("Degree, School, Feb 2009 – 2015"), never run together.
@@ -312,11 +314,14 @@ function labelOnly(paragraph: ParagraphNode, label: string): ParagraphNode {
 const withLabel = (label: string, value: string) =>
   value.toLowerCase().startsWith(label.trim().toLowerCase()) ? value : `${label}${value}`;
 
-function fillCell(cell: CellNode, fill: Fill, content: ResumeContent, ctx: Context): CellNode {
+function fillCell(
+  cell: CellNode,
+  fillLines: (paragraph: ParagraphNode) => ParagraphNode[],
+): CellNode {
   const paragraphs = cellParagraphs(cell);
   const first = paragraphs[0];
   if (!first) return cell;
-  const filled = fillParagraph(first, fill, content, ctx);
+  const filled = fillLines(first);
   // The cell's other paragraphs were the sample's continuation.
   const others = cell.children.filter((child) => child.kind !== "paragraph");
   return { ...cell, children: [...(filled.length ? filled : [emptyParagraph(first)]), ...others] };
@@ -396,6 +401,9 @@ class Filler {
   private readonly clears: Set<string>;
   private readonly groupsByFirst = new Map<string, FillGroup>();
   private readonly grouped = new Set<string>();
+  private readonly bulletSections: ReadonlySet<number>;
+  /** A bullet line of the template: its list style is borrowed for text shown as bullets. */
+  private readonly bulletModel: ParagraphNode | undefined;
 
   constructor(
     private readonly plan: FillPlan,
@@ -405,12 +413,57 @@ class Filler {
     private readonly extraLines: readonly string[] = [],
   ) {
     for (const fill of plan.fills) this.fills.set(fill.block, fill);
+    this.bulletSections = new Set(plan.bulletSections ?? []);
+    this.bulletModel = body.nodes.find(
+      (node): node is ParagraphNode =>
+        node.kind === "paragraph" && isNumbered(node) && paragraphText(node).trim().length > 0,
+    );
     this.clears = new Set(plan.clears);
     for (const group of plan.groups) {
       const ids = group.blocks.length ? group.blocks : group.rows;
       this.groupsByFirst.set(ids[0]!, group);
       for (const id of ids) this.grouped.add(id);
     }
+  }
+
+  /** Does this fill show running text the person asked to see as bullets? */
+  private wantsBullets(fill: Fill, ctx: Context): boolean {
+    const own = ctx.source !== undefined ? Number(ctx.source.slice(1)) : null;
+    for (const ref of fill.refs) {
+      for (const part of ref ? refParts(ref) : []) {
+        if (part === "summary") {
+          if (this.plan.bulletSummary) return true;
+          continue;
+        }
+        const entry = /^entry\.(\w+)$/.exec(part);
+        const explicit = /^s(\d+)(?:\.e\d+\.(\w+))?$/.exec(part);
+        const field = entry?.[1] ?? explicit?.[2];
+        // Only running text: headings, dates and places keep their lines.
+        const text =
+          field === undefined || ["text", "description", "bullets", "item"].includes(field);
+        if (!text) continue;
+        const section = entry ? own : explicit ? Number(explicit[1]) : null;
+        if (section !== null && this.bulletSections.has(section)) return true;
+      }
+    }
+    return false;
+  }
+
+  /** Fills one paragraph; text the person wants as bullets gets the template's bullet style. */
+  private fillText(paragraph: ParagraphNode, fill: Fill, ctx: Context): ParagraphNode[] {
+    if (!this.wantsBullets(fill, ctx)) return fillParagraph(paragraph, fill, this.content, ctx);
+    return fillParagraph(paragraph, fill, this.content, { ...ctx, forceBullets: true }).map(
+      (line) => {
+        if (isNumbered(line)) return line;
+        if (this.bulletModel) return { ...line, pPr: this.bulletModel.pPr };
+        const first = line.atoms.findIndex((atom) => atom.kind === "text" && atom.text.trim());
+        if (first === -1) return line;
+        const atoms = [...line.atoms];
+        const atom = atoms[first] as TextAtom;
+        atoms[first] = { ...atom, text: `• ${atom.text}` };
+        return { ...line, atoms };
+      },
+    );
   }
 
   private forbid(text: string) {
@@ -555,9 +608,7 @@ class Filler {
     const fill = this.fills.get(node.id);
     if (fill) {
       this.noteSample(node.id, paragraphText(node));
-      nodes.push(
-        ...fillParagraph(styledLike(node, source, index), fill, this.content, { numbered: false }),
-      );
+      nodes.push(...this.fillText(styledLike(node, source, index), fill, { numbered: false }));
       return index;
     }
     nodes.push(node);
@@ -587,7 +638,7 @@ class Filler {
           clone.push(paragraph);
           continue;
         }
-        const filled = fillParagraph(paragraph, fill, this.content, ctx);
+        const filled = this.fillText(paragraph, fill, ctx);
         if (firstFilled === -1 && filled.length > 0) firstFilled = clone.length;
         clone.push(...filled);
       }
@@ -662,7 +713,7 @@ class Filler {
         const fill = this.fills.get(child.id);
         if (!fill || child.opaque) return child;
         this.noteSample(child.id, cellText(child));
-        return fillCell(child, fill, this.content, ctx);
+        return fillCell(child, (paragraph) => this.fillText(paragraph, fill, ctx));
       }),
     };
   }

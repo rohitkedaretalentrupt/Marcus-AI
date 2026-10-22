@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { fileIdSchema } from "@/lib/files/validation";
+import { editActionSchema } from "@/lib/formatting/edits";
 import { idSchema } from "@/lib/validation/common";
 
 /**
@@ -201,6 +202,8 @@ export const startChatFormattingSchema = z.strictObject({
   text: z.string().max(4000).optional(),
   /** The assistant reply the message answers ("Want me to use Zillow?" → "yes"). */
   previousReply: z.string().max(20_000).optional(),
+  /** Changes asked for (a section left out, or shown as bullets), read from the message by the model. */
+  edits: z.array(editActionSchema).max(12).optional(),
   /** Template names already worked out from the message (by the intent reader); exact names. */
   templateNames: z.array(z.string().trim().min(1).max(200)).max(12).optional(),
 });

@@ -114,7 +114,10 @@ export function FormattingJobCard({ job }: { job: FormattingJobView }) {
 
   if (done) {
     const title = templateName;
-    const subtitle = candidate ? `${candidate} · Word document` : "Word document";
+    const subtitle = [
+      candidate ? `${candidate} · Word document` : "Word document",
+      ...job.edits,
+    ].join(" · ");
     return (
       <div className="formatting-done w-full max-w-[26rem] space-y-2 rounded-xl border bg-card p-2.5 text-card-foreground">
         <div className="flex items-center gap-2.5">
@@ -184,7 +187,11 @@ export function FormattingJobCard({ job }: { job: FormattingJobView }) {
         </span>
         <div className="min-w-0 flex-1 leading-tight">
           <p className="truncate text-sm font-medium">{templateName}</p>
-          {candidate ? <p className="truncate text-xs text-muted-foreground">{candidate}</p> : null}
+          {candidate || job.edits.length > 0 ? (
+            <p className="truncate text-xs text-muted-foreground">
+              {[candidate, ...job.edits].filter(Boolean).join(" · ")}
+            </p>
+          ) : null}
         </div>
         {active ? (
           <Button

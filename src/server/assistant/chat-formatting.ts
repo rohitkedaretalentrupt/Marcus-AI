@@ -1,6 +1,7 @@
 import "server-only";
 
 import { AppError } from "@/lib/errors/app-error";
+import type { EditAction } from "@/lib/formatting/edits";
 import type { FormattingJobView } from "@/lib/formatting/types";
 import { startFormattingsFromChat } from "@/server/formatting/formatting-service";
 import { startFormattingJobNow } from "@/server/formatting/schedule-formatting";
@@ -23,6 +24,7 @@ export async function startChatFormatting(
   text: string,
   previousReply: string | null,
   templateNames?: string[],
+  edits?: EditAction[],
 ): Promise<ChatFormattingOutcome> {
   try {
     enforceRateLimit(`format:${userId}`, RATE_LIMITS.formattingCreatePerUser);
@@ -30,6 +32,7 @@ export async function startChatFormatting(
       text: text.slice(0, 4000),
       ...(previousReply ? { previousReply: previousReply.slice(0, 20_000) } : {}),
       ...(templateNames?.length ? { templateNames } : {}),
+      ...(edits?.length ? { edits } : {}),
     });
     for (const { job, created } of started) if (created) startFormattingJobNow(userId, job.id);
     return { status: "started", job: started[0]!.job, jobs: started.map((entry) => entry.job) };
