@@ -52,6 +52,8 @@ export interface FormatResumeInput {
 export interface FillTemplateInput {
   resume: ResumeContent;
   blocks: BlockInfo[];
+  /** Sections the person asked to leave out of the document (they are not in `resume`). */
+  leftOut?: string[];
   /** Set for the one controlled correction request after a plan failed checks. */
   correction?: {
     previousPlan: AIFillPlan;
@@ -115,8 +117,10 @@ export interface ChatIntentInput {
   hasResume: boolean;
   /** The sections of the attached resume the person can refer to ("Summary" included). */
   resumeSections: string[];
-  /** The newest resume already formatted in this chat, if any. */
-  lastFormatted?: { template: string; changes: string[] } | null;
+  /** A few words of what each section holds, in the order of `resumeSections`. */
+  sectionPreviews?: string[];
+  /** The newest resume already formatted in this chat, if any (with the headings its Word file shows). */
+  lastFormatted?: { template: string; changes: string[]; headings?: string[] } | null;
 }
 
 /** What the person wants the app to do with the latest message. */

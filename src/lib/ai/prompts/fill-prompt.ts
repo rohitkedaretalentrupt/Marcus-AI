@@ -51,6 +51,11 @@ export function buildFillMessages(input: FillTemplateInput): PromptMessage[] {
       content: [
         `TEMPLATE:\n<template>\n${jsonForPrompt(toAIBlocksView(input.blocks))}\n</template>`,
         `RESUME:\n<resume>\n${jsonForPrompt(toAIResumeView(input.resume))}\n</resume>`,
+        ...(input.leftOut?.length
+          ? [
+              `LEFT OUT: the person asked to leave these sections out of the document: ${input.leftOut.map((title) => jsonForPrompt(title)).join(", ")}. They are not in the resume above. Whatever part of the template is meant for them (its heading and the rows, table or list under it) must stay empty: clear it. Never fill such a part with another section's content.`,
+            ]
+          : []),
       ].join("\n\n"),
     },
   ];

@@ -15,8 +15,16 @@ import { getDb } from "@/lib/db/client";
 import { resumeContentSchema } from "@/lib/documents/resume-content";
 import { AppError, ERROR_CODES, NotFoundError } from "@/lib/errors/app-error";
 import { looksLikeFormatRequest, matchTemplateNames } from "@/lib/formatting/chat-request";
-import { describeEdits, editableSections, parseStoredEdits } from "@/lib/formatting/edits";
+import { documentHeadings } from "@/lib/formatting/document-headings";
+import {
+  describeEdits,
+  editableSections,
+  parseStoredEdits,
+  sectionPreviews,
+} from "@/lib/formatting/edits";
 import type { FormattingJobView } from "@/lib/formatting/types";
+import { getStorageProvider } from "@/lib/storage/provider";
+import type { StorageKey } from "@/lib/storage/types";
 import { EXTRACTION_FAILURES, type ExtractionFailureCode } from "@/lib/resumes/types";
 import { addAssistantMessage, replyConflict } from "@/server/chat/conversation-service";
 import { logger } from "@/server/logger";
@@ -222,6 +230,7 @@ export interface AssistantReplyStream {
 const INTENT_HISTORY_MESSAGES = 6;
 const INTENT_TIMEOUT_MS = 15_000;
 const INTENT_ATTEMPTS = 2;
+const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024;
 
 /** What the model writes, after a formatting start, when a message needs no words back. */
 const NO_REPLY_MARKER = "[NO_REPLY]";
@@ -230,17 +239,34 @@ const NO_REPLY_MARKER = "[NO_REPLY]";
 async function lastFormattedIn(
   userId: string,
   conversationId: string,
-): Promise<{ template: string; changes: string[] } | null> {
+): Promise<{ template: string; changes: string[]; headings?: string[] } | null> {
   try {
     const job = await getDb().formattingJob.findFirst({
       where: { userId, conversationId, status: "COMPLETED" },
       orderBy: { createdAt: "desc" },
-      select: { edits: true, clientTemplate: { select: { name: true } } },
+      select: {
+        edits: true,
+        clientTemplate: { select: { name: true } },
+        document: { select: { storageKey: true } },
+      },
     });
     if (!job?.clientTemplate) return null;
+    let headings: string[] = [];
+    if (job.document) {
+      try {
+        const bytes = await getStorageProvider().getObject(
+          job.document.storageKey as StorageKey,
+          MAX_DOCUMENT_BYTES,
+        );
+        headings = await documentHeadings(bytes);
+      } catch {
+        headings = []; // the reading goes on without them
+      }
+    }
     return {
       template: job.clientTemplate.name,
       changes: describeEdits(parseStoredEdits(job.edits)),
+      ...(headings.length ? { headings } : {}),
     };
   } catch {
     return null;
@@ -348,6 +374,9 @@ export async function startAssistantReply(
         hasResume: true,
         resumeSections: attachedResumes[0]?.content
           ? editableSections(attachedResumes[0].content)
+          : [],
+        sectionPreviews: attachedResumes[0]?.content
+          ? sectionPreviews(attachedResumes[0].content)
           : [],
         lastFormatted: await lastFormattedIn(userId, id),
       };

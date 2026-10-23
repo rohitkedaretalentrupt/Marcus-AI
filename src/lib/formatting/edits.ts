@@ -17,10 +17,22 @@ export const formattingEditsSchema = z.object({
   removeSections: z.array(sectionName).max(12).default([]),
   /** Section titles whose text is shown as bullet points. */
   bulletSections: z.array(sectionName).max(12).default([]),
+  /**
+   * Headings of the Word file the person pointed at when removing a section
+   * ("ADDITIONAL SKILLS, …"): the template's block under that heading stays empty.
+   */
+  removeHeadings: z
+    .array(z.object({ heading: z.string().trim().min(1).max(200), section: sectionName }))
+    .max(12)
+    .default([]),
 });
 export type FormattingEdits = z.infer<typeof formattingEditsSchema>;
 
-export const NO_EDITS: FormattingEdits = { removeSections: [], bulletSections: [] };
+export const NO_EDITS: FormattingEdits = {
+  removeSections: [],
+  bulletSections: [],
+  removeHeadings: [],
+};
 
 export const EDIT_ACTIONS = ["remove", "restore", "bullets", "paragraph"] as const;
 
@@ -28,6 +40,8 @@ export const EDIT_ACTIONS = ["remove", "restore", "bullets", "paragraph"] as con
 export const editActionSchema = z.object({
   action: z.enum(EDIT_ACTIONS),
   section: sectionName,
+  /** For "remove": the heading (as the Word file shows it) the person named, when they named one. */
+  heading: z.string().trim().min(1).max(200).optional(),
 });
 export type EditAction = z.infer<typeof editActionSchema>;
 
@@ -50,6 +64,26 @@ export function editableSections(content: ResumeContent): string[] {
   return [...(content.summary ? [SUMMARY_SECTION] : []), ...content.sections.map((s) => s.title)];
 }
 
+const PREVIEW_CHARS = 110;
+
+/** A few words of what each section of `editableSections` holds (so a heading can be matched to it). */
+export function sectionPreviews(content: ResumeContent): string[] {
+  const clip = (text: string) =>
+    text.length <= PREVIEW_CHARS ? text : `${text.slice(0, PREVIEW_CHARS)}…`;
+  return [
+    ...(content.summary ? [clip(content.summary)] : []),
+    ...content.sections.map((section) =>
+      clip(
+        section.entries
+          .flatMap((entry) => [entry.heading, entry.subheading, ...entry.bullets.slice(0, 2)])
+          .filter((part): part is string => !!part)
+          .slice(0, 4)
+          .join("; "),
+      ),
+    ),
+  ];
+}
+
 /** The resume's own spelling of a section a person named (case-insensitive, exact), or null. */
 export function resolveSection(content: ResumeContent, wanted: string): string | null {
   return editableSections(content).find((title) => key(title) === key(wanted)) ?? null;
@@ -69,18 +103,28 @@ export function applyEditActions(
   actions: readonly EditAction[],
 ): FormattingEdits {
   let next = { ...edits };
-  for (const { action, section } of actions) {
+  for (const { action, section, heading } of actions) {
     if (action === "remove") {
       next = {
         removeSections: withTitle(next.removeSections, section),
         bulletSections: without(next.bulletSections, section),
+        removeHeadings:
+          heading && !next.removeHeadings.some((entry) => key(entry.heading) === key(heading))
+            ? [...next.removeHeadings, { heading, section }]
+            : next.removeHeadings,
       };
     } else if (action === "restore") {
-      next = { ...next, removeSections: without(next.removeSections, section) };
+      next = {
+        ...next,
+        removeSections: without(next.removeSections, section),
+        removeHeadings: next.removeHeadings.filter((entry) => key(entry.section) !== key(section)),
+      };
     } else if (action === "bullets") {
       next = {
+        ...next,
         removeSections: without(next.removeSections, section),
         bulletSections: withTitle(next.bulletSections, section),
+        removeHeadings: next.removeHeadings.filter((entry) => key(entry.section) !== key(section)),
       };
     } else {
       next = { ...next, bulletSections: without(next.bulletSections, section) };

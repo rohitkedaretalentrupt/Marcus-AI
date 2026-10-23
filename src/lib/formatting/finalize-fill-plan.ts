@@ -1,4 +1,4 @@
-import type { BlockInfo, ParagraphInfo } from "@/lib/documents/docx/template-blocks";
+import type { BlockInfo, ParagraphInfo, RowInfo } from "@/lib/documents/docx/template-blocks";
 import { inlineLabel, isHeadingLike, isLabelLike } from "@/lib/documents/docx/template-blocks";
 import type { ResumeContent } from "@/lib/documents/resume-content";
 
@@ -1287,6 +1287,8 @@ export function finalizeFillPlan(
     if (/recruit|supplier|vendor|comment|submission|question/i.test(info.text)) continue;
     let removed = 0;
     let empty = true;
+    // Column-header rows ("Skill/Competency | Years") go with their heading.
+    const headerRows: string[] = [];
     for (let index = at + 1; index < blocks.length; index++) {
       const block = blocks[index]!;
       if (block.kind === "paragraph" && isHeading(block)) break;
@@ -1300,12 +1302,48 @@ export function finalizeFillPlan(
           empty = false;
           break;
         }
-      } else if (!block.rows.every((row) => clears.has(row.id))) {
-        empty = false;
-        break;
-      } else removed++;
+      } else {
+        const kept = block.rows.filter((row) => !clears.has(row.id));
+        const headers = kept.filter((row) =>
+          row.cells.every((cell) => cell.bold && cell.text.trim() && !cell.opaque),
+        );
+        if (kept.length > headers.length || kept.length === block.rows.length) {
+          empty = false;
+          break;
+        }
+        headerRows.push(...headers.map((row) => row.id));
+        removed++;
+      }
     }
-    if (empty && removed > 0) clears.add(id);
+    if (empty && removed > 0) {
+      clears.add(id);
+      for (const row of headerRows) clears.add(row);
+    }
+  }
+
+  // The same inside a table whose title rows head several blocks of rows
+  // ("ADDITIONAL SKILLS, …", then its column headers and rows): a block whose
+  // rows were all removed takes its title and column headers along.
+  const isHeaderRow = (row: RowInfo) =>
+    row.cells.every((cell) => cell.bold && cell.text.trim() && !cell.opaque);
+  for (const block of blocks) {
+    if (block.kind !== "table") continue;
+    const { rows } = block;
+    rows.forEach((title, at) => {
+      if (clears.has(title.id) || !isTitleRow(title)) return;
+      let removed = 0;
+      const headers: string[] = [];
+      for (const row of rows.slice(at + 1)) {
+        if (isTitleRow(row)) break;
+        if (grouped.has(row.id) || row.cells.some((cell) => filledBlocks.has(cell.id))) return;
+        if (clears.has(row.id)) removed++;
+        else if (isHeaderRow(row)) headers.push(row.id);
+        else if (row.cells.some((cell) => cell.text.trim())) return;
+      }
+      if (removed === 0) return;
+      clears.add(title.id);
+      for (const id of headers) clears.add(id);
+    });
   }
 
   // --- 3. completeness ---
@@ -1479,5 +1517,77 @@ export function contentShownByFillPlan(
       ...(!hidden.has("location") && contact.location ? { location: contact.location } : {}),
       links: hidden.has("links") ? [] : contact.links,
     },
+  };
+}
+
+const normHeading = (text: string) =>
+  text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+
+/** A one-cell row in capitals ("ADDITIONAL SKILLS, …") that heads the rows after it. */
+function isTitleRow(row: RowInfo): boolean {
+  if (row.cells.length !== 1) return false;
+  const letters = row.cells[0]!.text.replace(/[^\p{L}]/gu, "");
+  const capitals = letters.replace(/[^\p{Lu}]/gu, "");
+  return letters.length >= 4 && capitals.length / letters.length > 0.85;
+}
+
+/**
+ * The plan without anything it puts under the named headings of the template
+ * (the person asked to remove "the additional skills section" they see in the
+ * Word file): the blocks under such a heading are left unplanned, so the
+ * engine clears them and the heading with them.
+ */
+export function withoutHeadings(
+  plan: AIFillPlan,
+  blocks: BlockInfo[],
+  headings: readonly string[],
+): AIFillPlan {
+  const wanted = headings.map(normHeading).filter((text) => text.length >= 4);
+  if (wanted.length === 0) return plan;
+  const matches = (text: string) => {
+    const own = normHeading(text);
+    return (
+      own.length >= 4 &&
+      wanted.some((heading) => own === heading || (own.length >= 8 && heading.includes(own)))
+    );
+  };
+  const region = new Set<string>(); // paragraph, row and cell ids under the headings
+  const addRow = (row: RowInfo) => {
+    region.add(row.id);
+    for (const cell of row.cells) region.add(cell.id);
+  };
+  blocks.forEach((block, index) => {
+    if (block.kind === "paragraph") {
+      if (!matches(block.text)) return;
+      region.add(block.id);
+      for (const next of blocks.slice(index + 1)) {
+        if (next.kind === "paragraph" ? isHeadingLike(next) : next.rows.some(isTitleRow)) break;
+        if (next.kind === "paragraph") region.add(next.id);
+        else next.rows.forEach(addRow);
+      }
+      return;
+    }
+    next: for (const [at, row] of block.rows.entries()) {
+      if (!row.cells.some((cell) => matches(cell.text))) continue;
+      addRow(row);
+      for (const following of block.rows.slice(at + 1)) {
+        if (isTitleRow(following)) break next;
+        addRow(following);
+      }
+      break;
+    }
+  });
+  if (region.size === 0) return plan;
+  const inRegion = (id: string) =>
+    region.has(id) ||
+    [...region].some((entry) => id.startsWith(`${entry}.`) && entry.includes(".r"));
+  return {
+    ...plan,
+    fills: plan.fills.filter((fill) => !inRegion(fill.block)),
+    groups: plan.groups.filter((group) => !inRegion(group.blocks[0] ?? group.rows[0] ?? "")),
+    keeps: plan.keeps.filter((id) => !inRegion(id)),
   };
 }

@@ -46,6 +46,7 @@ import type { FillPlan } from "@/lib/formatting/fill-plan";
 import {
   contentShownByFillPlan,
   finalizeFillPlan,
+  withoutHeadings,
   sampleValues,
   type FinalizeFillResult,
 } from "@/lib/formatting/finalize-fill-plan";
@@ -891,16 +892,38 @@ async function planFill(
   source: PlanSource,
   samples: readonly string[],
   signal: AbortSignal,
+  leftOut: readonly string[],
+  leftHeadings: readonly string[],
 ): Promise<FinalizeFillResult> {
-  const first = await provider.fillTemplate({ resume: content, blocks }, { signal });
-  const planned = finalizeFillPlan(first, content, blocks, source, samples);
+  const first = await provider.fillTemplate(
+    { resume: content, blocks, ...(leftOut.length ? { leftOut: [...leftOut] } : {}) },
+    { signal },
+  );
+  const planned = finalizeFillPlan(
+    withoutHeadings(first, blocks, leftHeadings),
+    content,
+    blocks,
+    source,
+    samples,
+  );
   if (planned.issues.length === 0) return planned;
   try {
     const corrected = await provider.fillTemplate(
-      { resume: content, blocks, correction: { previousPlan: first, issues: planned.issues } },
+      {
+        resume: content,
+        blocks,
+        ...(leftOut.length ? { leftOut: [...leftOut] } : {}),
+        correction: { previousPlan: first, issues: planned.issues },
+      },
       { signal },
     );
-    const second = finalizeFillPlan(corrected, content, blocks, source, samples);
+    const second = finalizeFillPlan(
+      withoutHeadings(corrected, blocks, leftHeadings),
+      content,
+      blocks,
+      source,
+      samples,
+    );
     // A correction can forget parts that were right: keep the better plan.
     return fillScore(second) <= fillScore(planned) ? second : planned;
   } catch (error) {
@@ -934,6 +957,10 @@ async function fillTemplateDocx(
   samples: readonly string[],
   /** Sections (and the summary) the person wants as bullet points. */
   bullets: { sections: number[]; summary: boolean } = { sections: [], summary: false },
+  /** Titles of the sections the person asked to leave out. */
+  leftOut: readonly string[] = [],
+  /** Headings of the template whose blocks the person asked to remove. */
+  leftHeadings: readonly string[] = [],
 ): Promise<FillOutcome> {
   let blocks: Awaited<ReturnType<typeof readTemplateBlocks>>;
   try {
@@ -950,7 +977,7 @@ async function fillTemplateDocx(
   // in parallel and the best one is kept (each may get one correction).
   const candidates = await Promise.allSettled(
     Array.from({ length: FILL_CANDIDATES }, () =>
-      planFill(provider, content, blocks, source, samples, signal),
+      planFill(provider, content, blocks, source, samples, signal, leftOut, leftHeadings),
     ),
   );
   const plans = candidates
@@ -1176,6 +1203,8 @@ export async function runFormattingJob(
           deadline,
           structure.data.placeholders.map((placeholder) => placeholder.text),
           { sections: edited.bulletSections, summary: edited.bulletSummary },
+          parseStoredEdits(job.edits).removeSections,
+          parseStoredEdits(job.edits).removeHeadings.map((entry) => entry.heading),
         );
       } catch (error) {
         if (deadline.aborted) return await fail("ai_timeout", "planning_deadline");

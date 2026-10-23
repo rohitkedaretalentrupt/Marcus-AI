@@ -853,10 +853,18 @@ class Filler {
         isHeadingLike(describeParagraph(next))
       );
     });
+    // A template with none (its sections are table rows) still gets a plain blank line.
+    const gap: ParagraphNode = {
+      ...(spacer ?? {
+        kind: "paragraph",
+        attrs: "",
+        pPr: plainModel ? withoutNumbering(plainModel.pPr) : "",
+      }),
+      id: "extra",
+      atoms: [],
+    };
     const last = body.nodes.at(-1);
-    if (spacer && !(last?.kind === "paragraph" && !paragraphText(last).trim())) {
-      body.nodes.push({ ...spacer, id: "extra", atoms: [] });
-    }
+    if (!(last?.kind === "paragraph" && !paragraphText(last).trim())) body.nodes.push(gap);
     body.nodes.push(paragraph(headingModel, ADDITIONAL_HEADING, true));
     // Items from the same section share one label.
     let previous: string | null = null;
@@ -868,7 +876,7 @@ class Filler {
           : item.label;
       if (item.label !== previous) {
         // A new label after a list gets the template's blank line above it.
-        if (previous !== null && spacer) body.nodes.push({ ...spacer, id: "extra", atoms: [] });
+        if (previous !== null) body.nodes.push(gap);
         body.nodes.push(label(title));
       }
       previous = item.label;

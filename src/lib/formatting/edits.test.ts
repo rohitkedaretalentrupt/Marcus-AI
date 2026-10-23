@@ -62,7 +62,11 @@ describe("applyEditActions", () => {
       { action: "remove", section: "Skills" },
       { action: "bullets", section: "Education" },
     ]);
-    expect(edits).toEqual({ removeSections: ["Skills"], bulletSections: ["Education"] });
+    expect(edits).toEqual({
+      removeSections: ["Skills"],
+      bulletSections: ["Education"],
+      removeHeadings: [],
+    });
 
     edits = applyEditActions(edits, [{ action: "restore", section: "skills" }]);
     expect(edits.removeSections).toEqual([]);
@@ -76,7 +80,11 @@ describe("applyEditActions", () => {
       { action: "remove", section: "Education" },
       { action: "remove", section: "Education" },
     ]);
-    expect(edits).toEqual({ removeSections: ["Education"], bulletSections: [] });
+    expect(edits).toEqual({
+      removeSections: ["Education"],
+      bulletSections: [],
+      removeHeadings: [],
+    });
   });
 });
 
@@ -92,6 +100,7 @@ describe("applyEdits", () => {
     const { content } = applyEdits(CONTENT, {
       removeSections: ["skills", "Summary"],
       bulletSections: [],
+      removeHeadings: [],
     });
     expect(content.sections.map((section) => section.title)).toEqual([
       "Work Experience",
@@ -105,6 +114,7 @@ describe("applyEdits", () => {
     const edited = applyEdits(CONTENT, {
       removeSections: ["Skills"],
       bulletSections: ["Work Experience", "Summary"],
+      removeHeadings: [],
     });
     const [experience] = edited.content.sections;
     expect(experience!.entries[0]!.description).toBeUndefined();
@@ -125,16 +135,33 @@ describe("applyEdits", () => {
 
 describe("describing and storing edits", () => {
   it("describes them for a job card, and reads stored values safely", () => {
-    expect(describeEdits({ removeSections: ["Skills"], bulletSections: ["Education"] })).toEqual([
-      "Without Skills",
-      "Education as bullets",
-    ]);
+    expect(
+      describeEdits({
+        removeSections: ["Skills"],
+        bulletSections: ["Education"],
+        removeHeadings: [],
+      }),
+    ).toEqual(["Without Skills", "Education as bullets"]);
     expect(describeEdits(null)).toEqual([]);
     expect(parseStoredEdits({ removeSections: ["Skills"] })).toEqual({
       removeSections: ["Skills"],
       bulletSections: [],
+      removeHeadings: [],
     });
     expect(parseStoredEdits("garbage")).toEqual(NO_EDITS);
     expect(parseStoredEdits(null)).toEqual(NO_EDITS);
+  });
+});
+
+describe("headings named for removal", () => {
+  it("are remembered with the section and dropped again when the section is restored", () => {
+    const heading = "ADDITIONAL SKILLS, COMPETENCIES, CERTIFICATIONS, ETC.";
+    const removed = applyEditActions(NO_EDITS, [
+      { action: "remove", section: "Certifications", heading },
+    ]);
+    expect(removed.removeSections).toEqual(["Certifications"]);
+    expect(removed.removeHeadings).toEqual([{ heading, section: "Certifications" }]);
+    const restored = applyEditActions(removed, [{ action: "restore", section: "certifications" }]);
+    expect(restored.removeHeadings).toEqual([]);
   });
 });
